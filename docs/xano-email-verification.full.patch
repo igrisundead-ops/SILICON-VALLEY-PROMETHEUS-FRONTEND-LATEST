@@ -1,0 +1,52 @@
+﻿
+diff --git a/package.json b/package.json
+index 9ca0272..cf2a249 100644
+--- a/package.json
++++ b/package.json
+@@ -48,6 +48,7 @@
+     "framer-motion": "12.29.2",
+     "input-otp": "1.4.1",
+     "lucide-react": "^0.454.0",
++    "motion": "^12.31.0",
+     "next": "16.0.10",
+     "next-themes": "^0.4.6",
+     "react": "19.2.0",
+@@ -73,4 +74,4 @@
+     "tw-animate-css": "1.3.3",
+     "typescript": "^5"
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/app/layout.tsx b/app/layout.tsx
+index 4489638..78bd653 100644
+--- a/app/layout.tsx
++++ b/app/layout.tsx
+@@ -1,11 +1,8 @@
+ import type { Metadata } from 'next'
+-import { Geist, Geist_Mono } from 'next/font/google'
+ import { Analytics } from '@vercel/analytics/next'
++import { ThemeProvider } from '@/components/theme-provider'
+ import './globals.css'
+ 
+-const _geist = Geist({ subsets: ["latin"] });
+-const _geistMono = Geist_Mono({ subsets: ["latin"] });
+-
+ export const metadata: Metadata = {
+   title: 'v0 App',
+   description: 'Created with v0',
+@@ -35,9 +32,11 @@ export default function RootLayout({
+   children: React.ReactNode
+ }>) {
+   return (
+-    <html lang="en">
+-      <body className={`font-sans antialiased`}>
+-        {children}
++    <html lang="en" className="dark" suppressHydrationWarning>
++      <body className="font-sans antialiased">
++        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
++          {children}
++        </ThemeProvider>
+         <Analytics />
+       </body>
+     </html>

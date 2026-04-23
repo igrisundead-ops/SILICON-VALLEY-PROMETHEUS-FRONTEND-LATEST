@@ -1,0 +1,733 @@
+﻿diff --git a/app/layout.tsx b/app/layout.tsx
+index 4489638..817e52b 100644
+--- a/app/layout.tsx
++++ b/app/layout.tsx
+@@ -1,11 +1,8 @@
+ import type { Metadata } from 'next'
+-import { Geist, Geist_Mono } from 'next/font/google'
+ import { Analytics } from '@vercel/analytics/next'
++import { ThemeProvider } from '@/components/theme-provider'
+ import './globals.css'
+ 
+-const _geist = Geist({ subsets: ["latin"] });
+-const _geistMono = Geist_Mono({ subsets: ["latin"] });
+-
+ export const metadata: Metadata = {
+   title: 'v0 App',
+   description: 'Created with v0',
+@@ -35,9 +32,11 @@ export default function RootLayout({
+   children: React.ReactNode
+ }>) {
+   return (
+-    <html lang="en">
+-      <body className={`font-sans antialiased`}>
+-        {children}
++    <html lang="en" suppressHydrationWarning>
++      <body className="font-sans antialiased">
++        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
++          {children}
++        </ThemeProvider>
+         <Analytics />
+       </body>
+     </html>
+diff --git a/components/ui/auth-page.tsx b/components/ui/auth-page.tsx
+new file mode 100644
+index 0000000..ab809d4
+--- /dev/null
++++ b/components/ui/auth-page.tsx
+@@ -0,0 +1,189 @@
++'use client';
++
++import * as React from 'react';
++import Link from 'next/link';
++import { motion, useReducedMotion } from 'framer-motion';
++import { AtSignIcon, AppleIcon, ChevronLeftIcon, GithubIcon, Grid2x2PlusIcon } from 'lucide-react';
++
++import { Button } from '@/components/ui/button';
++import { Input } from '@/components/ui/input';
++
++export function FloatingPaths({ position }: { position: number }) {
++  const reduced = useReducedMotion();
++
++  const paths = [
++    'M 0 40 C 80 10, 160 10, 240 40 S 400 70, 520 40',
++    'M 0 90 C 90 60, 160 60, 260 90 S 420 120, 560 90',
++    'M 0 150 C 110 120, 180 120, 290 150 S 460 180, 600 150',
++  ];
++
++  return (
++    <svg
++      className="absolute inset-0 h-full w-full"
++      viewBox="0 0 640 360"
++      preserveAspectRatio="none"
++      aria-hidden="true"
++      style={{
++        transform: position === -1 ? 'scaleX(-1)' : undefined,
++      }}
++    >
++      {paths.map((d, i) => (
++        <motion.path
++          key={`${position}-${d}`}
++          d={d}
++          fill="none"
++          stroke="rgba(255,255,255,0.14)"
++          strokeWidth="1"
++          initial={false}
++          animate={
++            reduced
++              ? undefined
++              : {
++                  strokeDasharray: [2, 8],
++                  strokeDashoffset: [0, -40],
++                  opacity: [0.25, 0.55, 0.25],
++                }
++          }
++          transition={
++            reduced
++              ? undefined
++              : {
++                  duration: 8 + i * 2,
++                  repeat: Infinity,
++                  ease: 'linear',
++                }
++          }
++        />
++      ))}
++    </svg>
++  );
++}
++
++export function GoogleIcon(props: React.SVGProps<SVGSVGElement>) {
++  return (
++    <svg viewBox="0 0 24 24" aria-hidden="true" {...props}>
++      <path
++        d="M21.35 11.1H12v2.9h5.35c-.24 1.3-1.5 3.8-5.35 3.8-3.22 0-5.86-2.66-5.86-5.9s2.64-5.9 5.86-5.9c1.84 0 3.07.79 3.78 1.47l2.58-2.48C16.87 3.6 14.7 2.5 12 2.5 6.98 2.5 2.9 6.6 2.9 11.9S6.98 21.3 12 21.3c6.93 0 8.62-4.87 8.62-7.39 0-.5-.05-.88-.12-1.21z"
++        fill="currentColor"
++      />
++    </svg>
++  );
++}
++
++export function AuthSeparator() {
++  return (
++    <div className="relative my-6">
++      <div className="absolute inset-0 flex items-center" aria-hidden="true">
++        <span className="w-full border-t" />
++      </div>
++      <div className="relative flex justify-center text-xs uppercase">
++        <span className="bg-background text-muted-foreground px-2">Or continue with email</span>
++      </div>
++    </div>
++  );
++}
++
++export function AuthPage() {
++  return (
++    <main className="relative md:h-screen md:overflow-hidden lg:grid lg:grid-cols-2">
++      <div className="bg-muted/60 relative hidden h-full flex-col border-r p-10 lg:flex">
++        <div className="from-background absolute inset-0 z-10 bg-gradient-to-t to-transparent" />
++        <div className="z-10 flex items-center gap-2">
++          <Grid2x2PlusIcon className="size-6" />
++          <p className="text-xl font-semibold">Asme</p>
++        </div>
++
++        <div className="z-10 mt-auto">
++          <blockquote className="space-y-2">
++            <p className="text-xl">
++              &ldquo;This Platform has helped me to save time and serve my clients faster than ever before.&rdquo;
++            </p>
++            <footer className="font-mono text-sm font-semibold">~ Ali Hassan</footer>
++          </blockquote>
++        </div>
++
++        <div className="absolute inset-0">
++          <FloatingPaths position={1} />
++          <FloatingPaths position={-1} />
++        </div>
++      </div>
++
++      <div className="relative flex min-h-screen flex-col justify-center p-4">
++        <div aria-hidden className="absolute inset-0 isolate contain-strict -z-10 opacity-60">
++          <div className="bg-[radial-gradient(68.54%_68.72%_at_55.02%_31.46%,--theme(--color-foreground/.06)_0,hsla(0,0%,55%,.02)_50%,--theme(--color-foreground/.01)_80%)] absolute top-0 right-0 h-320 w-140 -translate-y-87.5 rounded-full" />
++          <div className="bg-[radial-gradient(50%_50%_at_50%_50%,--theme(--color-foreground/.04)_0,--theme(--color-foreground/.01)_80%,transparent_100%)] absolute top-0 right-0 h-320 w-60 [translate:5%_-50%] rounded-full" />
++          <div className="bg-[radial-gradient(50%_50%_at_50%_50%,--theme(--color-foreground/.04)_0,--theme(--color-foreground/.01)_80%,transparent_100%)] absolute top-0 right-0 h-320 w-60 -translate-y-87.5 rounded-full" />
++        </div>
++
++        <Button variant="ghost" className="absolute top-7 left-5" asChild>
++          <Link href="/">
++            <ChevronLeftIcon className="size-4 me-2" />
++            Home
++          </Link>
++        </Button>
++
++        <div className="mx-auto space-y-4 sm:w-sm">
++          <div className="flex items-center gap-2 lg:hidden">
++            <Grid2x2PlusIcon className="size-6" />
++            <p className="text-xl font-semibold">Asme</p>
++          </div>
++
++          <div className="flex flex-col space-y-1">
++            <h1 className="font-heading text-2xl font-bold tracking-wide">Welcome back</h1>
++            <p className="text-muted-foreground text-base">Continue with OAuth or email.</p>
++          </div>
++
++          <div className="space-y-2">
++            <Button type="button" size="lg" className="w-full">
++              <GoogleIcon className="size-4 me-2" />
++              Continue with Google
++            </Button>
++            <Button type="button" size="lg" className="w-full">
++              <AppleIcon className="size-4 me-2" />
++              Continue with Apple
++            </Button>
++            <Button type="button" size="lg" className="w-full">
++              <GithubIcon className="size-4 me-2" />
++              Continue with GitHub
++            </Button>
++          </div>
++
++          <AuthSeparator />
++
++          <form
++            onSubmit={(e) => {
++              e.preventDefault();
++            }}
++            className="space-y-4"
++          >
++            <div>
++              <label className="text-sm font-medium" htmlFor="auth-email">
++                Email
++              </label>
++              <div className="mt-2 relative">
++                <AtSignIcon className="text-muted-foreground absolute start-3 top-1/2 size-4 -translate-y-1/2" />
++                <Input id="auth-email" type="email" placeholder="you@domain.com" className="peer ps-9" />
++              </div>
++            </div>
++
++            <Button type="submit" size="lg" className="w-full">
++              Continue With Email
++            </Button>
++          </form>
++
++          <p className="text-muted-foreground mt-8 text-sm">
++            By clicking continue, you agree to our{' '}
++            <Link href="/terms" className="hover:text-primary underline underline-offset-4">
++              Terms of Service
++            </Link>{' '}
++            and{' '}
++            <Link href="/privacy" className="hover:text-primary underline underline-offset-4">
++              Privacy Policy
++            </Link>
++            .
++          </p>
++        </div>
++      </div>
++    </main>
++  );
++}
+diff --git a/components/auth/auth-visuals.tsx b/components/auth/auth-visuals.tsx
+new file mode 100644
+index 0000000..726e3aa
+--- /dev/null
++++ b/components/auth/auth-visuals.tsx
+@@ -0,0 +1,79 @@
++'use client';
++
++import * as React from 'react';
++import { motion, useReducedMotion } from 'framer-motion';
++
++export function FloatingPaths({ position }: { position: number }) {
++  const reduced = useReducedMotion();
++
++  const paths = [
++    'M 0 40 C 80 10, 160 10, 240 40 S 400 70, 520 40',
++    'M 0 90 C 90 60, 160 60, 260 90 S 420 120, 560 90',
++    'M 0 150 C 110 120, 180 120, 290 150 S 460 180, 600 150',
++  ];
++
++  return (
++    <svg
++      className="absolute inset-0 h-full w-full"
++      viewBox="0 0 640 360"
++      preserveAspectRatio="none"
++      aria-hidden="true"
++      style={{
++        transform: position === -1 ? 'scaleX(-1)' : undefined,
++      }}
++    >
++      {paths.map((d, i) => (
++        <motion.path
++          key={`${position}-${d}`}
++          d={d}
++          fill="none"
++          stroke="rgba(255,255,255,0.14)"
++          strokeWidth="1"
++          initial={false}
++          animate={
++            reduced
++              ? undefined
++              : {
++                  strokeDasharray: [2, 8],
++                  strokeDashoffset: [0, -40],
++                  opacity: [0.25, 0.55, 0.25],
++                }
++          }
++          transition={
++            reduced
++              ? undefined
++              : {
++                  duration: 8 + i * 2,
++                  repeat: Infinity,
++                  ease: 'linear',
++                }
++          }
++        />
++      ))}
++    </svg>
++  );
++}
++
++export function GoogleIcon(props: React.SVGProps<SVGSVGElement>) {
++  return (
++    <svg viewBox="0 0 24 24" aria-hidden="true" {...props}>
++      <path
++        d="M21.35 11.1H12v2.9h5.35c-.24 1.3-1.5 3.8-5.35 3.8-3.22 0-5.86-2.66-5.86-5.9s2.64-5.9 5.86-5.9c1.84 0 3.07.79 3.78 1.47l2.58-2.48C16.87 3.6 14.7 2.5 12 2.5 6.98 2.5 2.9 6.6 2.9 11.9S6.98 21.3 12 21.3c6.93 0 8.62-4.87 8.62-7.39 0-.5-.05-.88-.12-1.21z"
++        fill="currentColor"
++      />
++    </svg>
++  );
++}
++
++export function AuthSeparator() {
++  return (
++    <div className="relative my-6">
++      <div className="absolute inset-0 flex items-center" aria-hidden="true">
++        <span className="w-full border-t" />
++      </div>
++      <div className="relative flex justify-center text-xs uppercase">
++        <span className="bg-background text-muted-foreground px-2">Or continue with email</span>
++      </div>
++    </div>
++  );
++}
+diff --git a/components/auth/AuthShell.tsx b/components/auth/AuthShell.tsx
+new file mode 100644
+index 0000000..69b2a7a
+--- /dev/null
++++ b/components/auth/AuthShell.tsx
+@@ -0,0 +1,103 @@
++'use client';
++
++import Link from 'next/link';
++import React from 'react';
++import { Button } from '@/components/ui/button';
++import { ChevronLeftIcon, Grid2x2PlusIcon, AppleIcon, GithubIcon } from 'lucide-react';
++import { FloatingPaths, GoogleIcon, AuthSeparator } from './auth-visuals';
++
++type AuthShellProps = {
++  title: string;
++  subtitle: string;
++  children: React.ReactNode;
++  showMobileBrandRow?: boolean;
++};
++
++export function AuthShell({ title, subtitle, children, showMobileBrandRow = true }: AuthShellProps) {
++  return (
++    <main className="relative md:h-screen md:overflow-hidden lg:grid lg:grid-cols-2">
++      <div className="bg-muted/60 relative hidden h-full flex-col border-r p-10 lg:flex">
++        <div className="from-background absolute inset-0 z-10 bg-gradient-to-t to-transparent" />
++        <div className="z-10 flex items-center gap-2">
++          <Grid2x2PlusIcon className="size-6" />
++          <p className="text-xl font-semibold">Asme</p>
++        </div>
++
++        <div className="z-10 mt-auto">
++          <blockquote className="space-y-2">
++            <p className="text-xl">
++              &ldquo;This Platform has helped me to save time and serve my clients faster than ever before.&rdquo;
++            </p>
++            <footer className="font-mono text-sm font-semibold">~ Ali Hassan</footer>
++          </blockquote>
++        </div>
++
++        <div className="absolute inset-0">
++          <FloatingPaths position={1} />
++          <FloatingPaths position={-1} />
++        </div>
++      </div>
++
++      <div className="relative flex min-h-screen flex-col justify-center p-4">
++        <div aria-hidden className="absolute inset-0 isolate contain-strict -z-10 opacity-60">
++          <div className="bg-[radial-gradient(68.54%_68.72%_at_55.02%_31.46%,--theme(--color-foreground/.06)_0,hsla(0,0%,55%,.02)_50%,--theme(--color-foreground/.01)_80%)] absolute top-0 right-0 h-320 w-140 -translate-y-87.5 rounded-full" />
++          <div className="bg-[radial-gradient(50%_50%_at_50%_50%,--theme(--color-foreground/.04)_0,--theme(--color-foreground/.01)_80%,transparent_100%)] absolute top-0 right-0 h-320 w-60 [translate:5%_-50%] rounded-full" />
++          <div className="bg-[radial-gradient(50%_50%_at_50%_50%,--theme(--color-foreground/.04)_0,--theme(--color-foreground/.01)_80%,transparent_100%)] absolute top-0 right-0 h-320 w-60 -translate-y-87.5 rounded-full" />
++        </div>
++
++        <Button variant="ghost" className="absolute top-7 left-5" asChild>
++          <Link href="/">
++            <ChevronLeftIcon className="size-4 me-2" />
++            Home
++          </Link>
++        </Button>
++
++        <div className="mx-auto space-y-4 sm:w-sm">
++          {showMobileBrandRow ? (
++            <div className="flex items-center gap-2 lg:hidden">
++              <Grid2x2PlusIcon className="size-6" />
++              <p className="text-xl font-semibold">Asme</p>
++            </div>
++          ) : null}
++
++          <div className="flex flex-col space-y-1">
++            <h1 className="font-heading text-2xl font-bold tracking-wide">{title}</h1>
++            <p className="text-muted-foreground text-base">{subtitle}</p>
++          </div>
++
++          <div className="space-y-2">
++            <Button type="button" size="lg" className="w-full">
++              <GoogleIcon className="size-4 me-2" />
++              Continue with Google
++            </Button>
++            <Button type="button" size="lg" className="w-full">
++              <AppleIcon className="size-4 me-2" />
++              Continue with Apple
++            </Button>
++            <Button type="button" size="lg" className="w-full">
++              <GithubIcon className="size-4 me-2" />
++              Continue with GitHub
++            </Button>
++          </div>
++
++          <AuthSeparator />
++
++          {children}
++
++          <p className="text-muted-foreground mt-8 text-sm">
++            By clicking continue, you agree to our{' '}
++            <Link href="/terms" className="hover:text-primary underline underline-offset-4">
++              Terms of Service
++            </Link>{' '}
++            and{' '}
++            <Link href="/privacy" className="hover:text-primary underline underline-offset-4">
++              Privacy Policy
++            </Link>
++            .
++          </p>
++        </div>
++      </div>
++    </main>
++  );
++}
++
+diff --git a/components/auth/LoginForm.tsx b/components/auth/LoginForm.tsx
+new file mode 100644
+index 0000000..cc5cb3b
+--- /dev/null
++++ b/components/auth/LoginForm.tsx
+@@ -0,0 +1,111 @@
++'use client'
++
++import * as React from 'react'
++import Link from 'next/link'
++import { AtSignIcon, LockIcon } from 'lucide-react'
++
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++
++function isValidEmail(email: string) {
++  return email.includes('@')
++}
++
++export function LoginForm() {
++  const [email, setEmail] = React.useState('')
++  const [password, setPassword] = React.useState('')
++  const [submitting, setSubmitting] = React.useState(false)
++
++  const [errors, setErrors] = React.useState<{ email?: string; password?: string }>({})
++
++  const validate = () => {
++    const next: typeof errors = {}
++    if (!email.trim() || !isValidEmail(email)) next.email = 'Enter a valid email.'
++    if (!password || password.length < 8) next.password = 'Password must be at least 8 characters.'
++    setErrors(next)
++    return Object.keys(next).length === 0
++  }
++
++  return (
++    <form
++      onSubmit={(e) => {
++        e.preventDefault()
++        if (!validate()) return
++        setSubmitting(true)
++        window.setTimeout(() => {
++          console.log('login', { email, password })
++          setSubmitting(false)
++        }, 800)
++      }}
++      className="space-y-4"
++    >
++      <div>
++        <label className="text-sm font-medium" htmlFor="login-email">
++          Email
++        </label>
++        <div className="mt-2 relative">
++          <AtSignIcon className="text-muted-foreground absolute start-3 top-1/2 size-4 -translate-y-1/2" />
++          <Input
++            id="login-email"
++            type="email"
++            placeholder="you@domain.com"
++            className="peer ps-9"
++            value={email}
++            onChange={(e) => setEmail(e.target.value)}
++            autoComplete="email"
++          />
++        </div>
++        {errors.email ? (
++          <div className="mt-1 text-xs text-red-500/80">{errors.email}</div>
++        ) : null}
++      </div>
++
++      <div>
++        <label className="text-sm font-medium" htmlFor="login-password">
++          Password
++        </label>
++        <div className="mt-2 relative">
++          <LockIcon className="text-muted-foreground absolute start-3 top-1/2 size-4 -translate-y-1/2" />
++          <Input
++            id="login-password"
++            type="password"
++            placeholder="Your password"
++            className="peer ps-9"
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            autoComplete="current-password"
++          />
++        </div>
++        {errors.password ? (
++          <div className="mt-1 text-xs text-red-500/80">{errors.password}</div>
++        ) : null}
++      </div>
++
++      <div className="flex items-center justify-between">
++        <div />
++        <Link href="/forgot-password" className="text-muted-foreground text-sm hover:text-primary underline underline-offset-4">
++          Forgot password?
++        </Link>
++      </div>
++
++      <Button
++        type="submit"
++        size="lg"
++        className="w-full"
++        disabled={submitting}
++      >
++        {submitting ? 'Signing in...' : 'Sign in'}
++      </Button>
++
++      <div className="text-muted-foreground text-sm">
++        Don&apos;t have an account?{' '}
++        <Link
++          href="/signup"
++          className="hover:text-primary underline underline-offset-4"
++        >
++          Sign up
++        </Link>
++      </div>
++    </form>
++  )
++}
+diff --git a/components/auth/SignupForm.tsx b/components/auth/SignupForm.tsx
+new file mode 100644
+index 0000000..4e31acb
+--- /dev/null
++++ b/components/auth/SignupForm.tsx
+@@ -0,0 +1,155 @@
++'use client'
++
++import * as React from 'react'
++import Link from 'next/link'
++import { AtSignIcon, LockIcon, UserIcon } from 'lucide-react'
++
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++
++function isValidEmail(email: string) {
++  return email.includes('@')
++}
++
++export function SignupForm() {
++  const [name, setName] = React.useState('')
++  const [email, setEmail] = React.useState('')
++  const [password, setPassword] = React.useState('')
++  const [confirmPassword, setConfirmPassword] = React.useState('')
++  const [submitting, setSubmitting] = React.useState(false)
++
++  const [errors, setErrors] = React.useState<{
++    name?: string
++    email?: string
++    password?: string
++    confirmPassword?: string
++  }>({})
++
++  const validate = () => {
++    const next: typeof errors = {}
++    if (!name.trim()) next.name = 'Full name is required.'
++    if (!email.trim() || !isValidEmail(email)) next.email = 'Enter a valid email.'
++    if (!password || password.length < 8) next.password = 'Password must be at least 8 characters.'
++    if (confirmPassword !== password) next.confirmPassword = 'Passwords must match.'
++    setErrors(next)
++    return Object.keys(next).length === 0
++  }
++
++  return (
++    <form
++      onSubmit={(e) => {
++        e.preventDefault()
++        if (!validate()) return
++        setSubmitting(true)
++        window.setTimeout(() => {
++          console.log('signup', { name, email, password })
++          setSubmitting(false)
++        }, 800)
++      }}
++      className="space-y-4"
++    >
++      <div>
++        <label className="text-sm font-medium" htmlFor="signup-name">
++          Full name
++        </label>
++        <div className="mt-2 relative">
++          <UserIcon className="text-muted-foreground absolute start-3 top-1/2 size-4 -translate-y-1/2" />
++          <Input
++            id="signup-name"
++            type="text"
++            placeholder="Your name"
++            className="peer ps-9"
++            value={name}
++            onChange={(e) => setName(e.target.value)}
++            autoComplete="name"
++          />
++        </div>
++        {errors.name ? (
++          <div className="mt-1 text-xs text-red-500/80">{errors.name}</div>
++        ) : null}
++      </div>
++
++      <div>
++        <label className="text-sm font-medium" htmlFor="signup-email">
++          Email
++        </label>
++        <div className="mt-2 relative">
++          <AtSignIcon className="text-muted-foreground absolute start-3 top-1/2 size-4 -translate-y-1/2" />
++          <Input
++            id="signup-email"
++            type="email"
++            placeholder="you@domain.com"
++            className="peer ps-9"
++            value={email}
++            onChange={(e) => setEmail(e.target.value)}
++            autoComplete="email"
++          />
++        </div>
++        {errors.email ? (
++          <div className="mt-1 text-xs text-red-500/80">{errors.email}</div>
++        ) : null}
++      </div>
++
++      <div>
++        <label className="text-sm font-medium" htmlFor="signup-password">
++          Password
++        </label>
++        <div className="mt-2 relative">
++          <LockIcon className="text-muted-foreground absolute start-3 top-1/2 size-4 -translate-y-1/2" />
++          <Input
++            id="signup-password"
++            type="password"
++            placeholder="Create a password"
++            className="peer ps-9"
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            autoComplete="new-password"
++          />
++        </div>
++        {errors.password ? (
++          <div className="mt-1 text-xs text-red-500/80">{errors.password}</div>
++        ) : null}
++      </div>
++
++      <div>
++        <label className="text-sm font-medium" htmlFor="signup-confirm">
++          Confirm password
++        </label>
++        <div className="mt-2 relative">
++          <LockIcon className="text-muted-foreground absolute start-3 top-1/2 size-4 -translate-y-1/2" />
++          <Input
++            id="signup-confirm"
++            type="password"
++            placeholder="Repeat your password"
++            className="peer ps-9"
++            value={confirmPassword}
++            onChange={(e) => setConfirmPassword(e.target.value)}
++            autoComplete="new-password"
++          />
++        </div>
++        {errors.confirmPassword ? (
++          <div className="mt-1 text-xs text-red-500/80">{errors.confirmPassword}</div>
++        ) : null}
++      </div>
++
++      <Button
++        type="submit"
++        size="lg"
++        className="w-full"
++        disabled={submitting}
++      >
++        {submitting ? 'Creating account...' : 'Create account'}
++      </Button>
++
++      <div className="text-muted-foreground text-sm">
++        Already have an account?{' '}
++        <Link
++          href="/login"
++          className="hover:text-primary underline underline-offset-4"
++        >
++          Sign in
++        </Link>
++      </div>
++    </form>
++  )
++}
+diff --git a/app/(auth)/login/page.tsx b/app/(auth)/login/page.tsx
+new file mode 100644
+index 0000000..d4f4b16
+--- /dev/null
++++ b/app/(auth)/login/page.tsx
+@@ -0,0 +1,11 @@
++import { AuthShell } from '@/components/auth/AuthShell'
++import { LoginForm } from '@/components/auth/LoginForm'
++
++export default function LoginPage() {
++  return (
++    <AuthShell title="Sign in" subtitle="Use OAuth or your email and password.">
++      <LoginForm />
++    </AuthShell>
++  )
++}
++
+diff --git a/app/(auth)/signup/page.tsx b/app/(auth)/signup/page.tsx
+new file mode 100644
+index 0000000..033f24c
+--- /dev/null
++++ b/app/(auth)/signup/page.tsx
+@@ -0,0 +1,11 @@
++import { AuthShell } from '@/components/auth/AuthShell'
++import { SignupForm } from '@/components/auth/SignupForm'
++
++export default function SignupPage() {
++  return (
++    <AuthShell title="Create account" subtitle="Create a new account in under a minute.">
++      <SignupForm />
++    </AuthShell>
++  )
++}
++

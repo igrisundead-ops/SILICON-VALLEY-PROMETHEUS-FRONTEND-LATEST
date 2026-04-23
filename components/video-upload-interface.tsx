@@ -1,0 +1,2762 @@
+"use client";
+
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import Image from "next/image";
+import { cn } from "@/lib/utils";
+import {
+    Video,
+    Upload,
+    FileUp,
+    Figma,
+    MonitorIcon,
+    CircleUserRound,
+    ArrowUpIcon,
+    Paperclip,
+    PlusIcon,
+    SendIcon,
+    XIcon,
+    Sparkles,
+    Command,
+    Grid3X3,
+    Film,
+    Music2,
+    FileText,
+    PanelsTopLeft,
+    MessageSquare,
+    ImageIcon, // Added import for ImageIcon
+    Link as LinkIcon,
+    Loader2,
+} from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import * as React from "react";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { GlassUploadModalView } from "@/components/ui/glass-upload-modal-view";
+import { DynamicFrameLayout } from "@/components/ui/dynamic-frame-layout";
+import { TextEffect } from "@/components/ui/text-effect";
+import { InfinityTrailLoader } from "@/components/editor/infinity-trail-loader";
+import type { DynamicFrame } from "@/components/ui/dynamic-frame-layout";
+import { InteractiveOrb } from "@/components/ui/interactive-orb";
+import { STYLE_TEMPLATES } from "@/lib/styles/style-templates";
+import {
+    detectSourceFileKind,
+    formatAspectFamily,
+    formatDurationBucket,
+    formatFileSize,
+    formatProcessingClass,
+    formatSourceProfileMetric,
+    formatSourceOrientation,
+    formatTimeProfile,
+    formatWeightBucket,
+    inspectSourceFile,
+} from "@/lib/media/source-profile";
+import { clearPendingEditorNavigation, getPendingEditorNavigation, markPendingEditorNavigation, rememberCurrentPathForEditorReturn } from "@/lib/editor-navigation";
+import { createProcessingJob, createProject, getActiveStyleId, getMostRecentProject, startProcessing as persistStartProcessing, setActiveStyleId as persistActiveStyleId } from "@/lib/mock";
+import { setSessionSourcePreview } from "@/lib/source-preview-session";
+import type { SourceProfile } from "@/lib/types";
+import { useSourceStage } from "@/hooks/use-source-stage";
+import { toast } from "sonner";
+
+type AirtableImageArchiveResponse = {
+    ok?: boolean;
+    where?: string;
+    error?: string;
+    missing?: string[];
+    items: Array<{
+        id: string;
+        name: string | null;
+        styleKey: string | null;
+        imageUrl: string | null;
+        thumbUrl: string | null;
+        hasAttachment: boolean;
+        tags: string[];
+        updatedTime: string;
+    }>;
+};
+
+const AIRTABLE_STYLE_PREVIEWS_SESSION_KEY = "prometheus.airtable-style-previews.v1";
+const EDITOR_NAVIGATION_FALLBACK_DELAY_MS = 6000;
+const SHOULD_USE_EDITOR_NAVIGATION_FALLBACK = process.env.NODE_ENV === "production";
+
+function waitForNextPaint() {
+    if (typeof window === "undefined") {
+        return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+    });
+}
+
+let airtableStylePreviewsMemoryCache: Record<string, string[]> | null = null;
+let airtableStylePreviewsRequest: Promise<Record<string, string[]>> | null = null;
+
+function normalizeAirtableStylePreviewCache(value: unknown): Record<string, string[]> | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+    const entries = Object.entries(value as Record<string, unknown>).filter((entry): entry is [string, string[]] => {
+        const previewUrls = entry[1];
+        return Array.isArray(previewUrls) && previewUrls.every((item) => typeof item === "string");
+    });
+
+    return Object.fromEntries(entries);
+}
+
+function readAirtableStylePreviewCache() {
+    if (airtableStylePreviewsMemoryCache) return airtableStylePreviewsMemoryCache;
+    if (typeof window === "undefined") return null;
+
+    try {
+        const raw = window.sessionStorage.getItem(AIRTABLE_STYLE_PREVIEWS_SESSION_KEY);
+        const parsed = normalizeAirtableStylePreviewCache(raw ? JSON.parse(raw) : null);
+        airtableStylePreviewsMemoryCache = parsed;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function writeAirtableStylePreviewCache(cache: Record<string, string[]>) {
+    airtableStylePreviewsMemoryCache = cache;
+    if (typeof window === "undefined") return;
+
+    try {
+        window.sessionStorage.setItem(AIRTABLE_STYLE_PREVIEWS_SESSION_KEY, JSON.stringify(cache));
+    } catch {
+        // Ignore cache persistence failures and keep the in-memory fallback.
+    }
+}
+
+async function fetchAirtableStylePreviewArchive() {
+    const cached = readAirtableStylePreviewCache();
+    if (cached) return cached;
+    if (airtableStylePreviewsRequest) return airtableStylePreviewsRequest;
+
+    airtableStylePreviewsRequest = (async () => {
+        const norm = (value: string) =>
+            value
+                .toLowerCase()
+                .trim()
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/(^-|-$)/g, "");
+
+        try {
+            const res = await fetch("/api/airtable/images?limit=200", { cache: "no-store" });
+            const data = (await res.json().catch(() => null)) as AirtableImageArchiveResponse | null;
+            if (!res.ok) {
+                if (process.env.NODE_ENV === "development") {
+                    const detail = data?.error
+                        ?? (Array.isArray(data?.missing) && data.missing.length > 0
+                            ? `Missing env: ${data.missing.join(", ")}`
+                            : `HTTP ${res.status}`);
+
+                    console.warn(
+                        `[Airtable] preview archive unavailable, falling back to local previews. ${detail}`,
+                    );
+                }
+
+                writeAirtableStylePreviewCache({});
+                return {};
+            }
+
+            const byStyle: Record<string, string[]> = {};
+
+            for (const item of data?.items ?? []) {
+                const styleKey = norm((item.styleKey ?? "").trim());
+                const src = item.thumbUrl ?? item.imageUrl ?? null;
+                if (!styleKey || !src) continue;
+                (byStyle[styleKey] ??= []).push(src);
+            }
+
+            for (const key of Object.keys(byStyle)) {
+                byStyle[key] = Array.from(new Set(byStyle[key])).slice(0, 3);
+            }
+
+            if (process.env.NODE_ENV === "development") {
+                console.log("[Airtable] styleKeys:", Object.keys(byStyle).slice(0, 20));
+            }
+
+            writeAirtableStylePreviewCache(byStyle);
+            return byStyle;
+        } catch (error) {
+            if (process.env.NODE_ENV === "development") {
+                console.warn("Failed to load Airtable Image Archive previews, using local previews instead.", error);
+            }
+
+            writeAirtableStylePreviewCache({});
+            return {};
+        } finally {
+            airtableStylePreviewsRequest = null;
+        }
+    })();
+
+    return airtableStylePreviewsRequest;
+}
+
+interface UseAutoResizeTextareaProps {
+    minHeight: number;
+    maxHeight?: number;
+    value?: string;
+}
+
+function useAutoResizeTextarea({
+    minHeight,
+    maxHeight,
+    value,
+}: UseAutoResizeTextareaProps) {
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    const adjustHeight = useCallback(
+        (reset?: boolean) => {
+            const textarea = textareaRef.current;
+            if (!textarea) return;
+
+            if (reset) {
+                textarea.style.height = `${minHeight}px`;
+                return;
+            }
+
+            textarea.style.height = `${minHeight}px`;
+            const newHeight = Math.max(
+                minHeight,
+                Math.min(
+                    textarea.scrollHeight,
+                    maxHeight ?? Number.POSITIVE_INFINITY
+                )
+            );
+
+            textarea.style.height = `${newHeight}px`;
+        },
+        [minHeight, maxHeight]
+    );
+
+    useEffect(() => {
+        const textarea = textareaRef.current;
+        if (textarea) {
+            textarea.style.height = `${minHeight}px`;
+        }
+    }, [minHeight]);
+
+    useEffect(() => {
+        const handleResize = () => adjustHeight();
+        window.addEventListener("resize", handleResize);
+        return () => window.removeEventListener("resize", handleResize);
+    }, [adjustHeight]);
+
+    useLayoutEffect(() => {
+        adjustHeight();
+    }, [adjustHeight, value]);
+
+    return { textareaRef, adjustHeight };
+}
+
+interface CommandSuggestion {
+    icon: React.ComponentType<{ className?: string }>;
+    label: string;
+    description: string;
+    prefix: string;
+}
+
+interface CreatorMention {
+    id: string;
+    name: string;
+    niche: string;
+    keywords: string[];
+}
+
+const CREATOR_MENTIONS: CreatorMention[] = [
+    { id: "ali-abdaal", name: "Ali Abdaal", niche: "productivity storytelling", keywords: ["ali", "abdaal", "study", "productivity"] },
+    { id: "alex-hormozi", name: "Alex Hormozi", niche: "direct response business", keywords: ["alex", "hormozi", "offers", "business"] },
+    { id: "mrbeast", name: "MrBeast", niche: "retention-heavy viral", keywords: ["mrbeast", "beast", "viral", "high energy"] },
+    { id: "ireen-zhang", name: "Irene Zhang", niche: "cinematic lifestyle", keywords: ["irene", "zhang", "cinematic", "lifestyle"] },
+    { id: "iman-gadzhi", name: "Iman Gadzhi", niche: "luxury business edits", keywords: ["iman", "gadzhi", "luxury", "agency"] },
+    { id: "marques-brownlee", name: "Marques Brownlee", niche: "clean tech authority", keywords: ["mkbhd", "marques", "brownlee", "tech"] },
+    { id: "emma-chamberlain", name: "Emma Chamberlain", niche: "raw personal vlog", keywords: ["emma", "chamberlain", "vlog", "casual"] },
+    { id: "peter-mckinnon", name: "Peter McKinnon", niche: "cinematic creator cuts", keywords: ["peter", "mckinnon", "cinematic", "photo"] },
+];
+
+function findMentionContext(text: string, caret: number): { start: number; query: string } | null {
+    const safeCaret = Math.max(0, Math.min(caret, text.length));
+    const left = text.slice(0, safeCaret);
+    const atIndex = left.lastIndexOf("@");
+    if (atIndex < 0) return null;
+
+    const charBefore = atIndex > 0 ? left[atIndex - 1] : " ";
+    if (/\S/.test(charBefore)) return null;
+
+    const query = left.slice(atIndex + 1);
+    if (/[\s\n\t]/.test(query)) return null;
+    return { start: atIndex, query };
+}
+
+interface TextareaProps
+  extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
+  containerClassName?: string;
+  showRing?: boolean;
+}
+
+type SlashCommandKey = "clone" | "improve";
+const SLASH_COMMANDS = {
+    clone: { label: "Clone Editing Style", raw: "/clone" },
+    improve: { label: "Improve", raw: "/improve" },
+} as const;
+type ActiveSlashCommand = {
+    key: SlashCommandKey;
+    label: (typeof SLASH_COMMANDS)[SlashCommandKey]["label"];
+    raw: (typeof SLASH_COMMANDS)[SlashCommandKey]["raw"];
+};
+
+const COMMAND_SUGGESTIONS: CommandSuggestion[] = [
+    {
+        icon: ImageIcon,
+        label: "Clone Editing Style",
+        description: "Generate a UI from a screenshot",
+        prefix: "/clone",
+    },
+    {
+        icon: MonitorIcon,
+        label: "Improve",
+        description: "Improve existing UI design",
+        prefix: "/improve",
+    },
+];
+
+const COMPOSER_MODES = [
+    { label: "Prompt", icon: MessageSquare },
+    { label: "Motion", icon: Film },
+    { label: "Music", icon: Music2 },
+    { label: "Output", icon: Sparkles },
+] as const;
+
+interface PromptComposerSubmitPayload {
+    message: string;
+    activeSlashCommand: ActiveSlashCommand | null;
+    creatorMentions: CreatorMention[];
+}
+
+interface PromptComposerProps {
+    activeStyleName: string | null;
+    attachments: string[];
+    templatesOpen: boolean;
+    onClearStyle: () => void;
+    onOpenTemplates: () => void;
+    onOpenUpload: () => void;
+    onRemoveAttachment: (index: number) => void;
+    onSubmit: (payload: PromptComposerSubmitPayload) => boolean | Promise<boolean>;
+}
+
+type PendingUploadKind = "video" | "image" | "audio" | "file";
+type PendingUpload = {
+    file: File;
+    previewUrl: string;
+    kind: PendingUploadKind;
+    sourceProfile: SourceProfile | null;
+    inspectionState: "idle" | "inspecting" | "ready" | "failed";
+    inspectionError: string | null;
+};
+
+function detectUploadKind(file: File): PendingUploadKind {
+    return detectSourceFileKind(file) as PendingUploadKind;
+}
+
+const DEMO_FRAMES: DynamicFrame[] = [
+    {
+        id: 1,
+        video: "https://static.cdn-luma.com/files/981e483f71aa764b/Company%20Thing%20Exported.mp4",
+        poster: "/style-previews/iman-1.jpg",
+        priority: true,
+        defaultPos: { x: 0, y: 0, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+    },
+    {
+        id: 2,
+        video: "https://static.cdn-luma.com/files/58ab7363888153e3/WebGL%20Exported%20(1).mp4",
+        poster: "/style-previews/reels-heat-1.webp",
+        priority: true,
+        defaultPos: { x: 4, y: 0, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+        title: "Model Preview",
+        headline: "RAY 2",
+        description:
+            "A large-scale video model with natural, coherent motion. Handles text, image, and video prompts.",
+    },
+    {
+        id: 3,
+        video: "https://static.cdn-luma.com/files/58ab7363888153e3/Jitter%20Exported%20Poster.mp4",
+        poster: "/style-previews/red-statue-1.jpg",
+        priority: true,
+        defaultPos: { x: 8, y: 0, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+        title: "Visual Prompt",
+        description: "Beautiful visuals at the speed of thought.",
+    },
+    {
+        id: 4,
+        video: "https://static.cdn-luma.com/files/58ab7363888153e3/Exported%20Web%20Video.mp4",
+        poster: "/style-previews/podcast-1.jpg",
+        defaultPos: { x: 0, y: 4, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+    },
+    {
+        id: 5,
+        video: "https://static.cdn-luma.com/files/58ab7363888153e3/Logo%20Exported.mp4",
+        poster: "/style-previews/reels-heat-2.webp",
+        defaultPos: { x: 4, y: 4, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+    },
+    {
+        id: 6,
+        video: "https://static.cdn-luma.com/files/58ab7363888153e3/Animation%20Exported%20(4).mp4",
+        poster: "/style-previews/docs-story-1.jpg",
+        defaultPos: { x: 8, y: 4, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+        align: "bottom-right",
+        title: "Style Prompt",
+        description: "@style bird like the reference",
+    },
+    {
+        id: 7,
+        video: "https://static.cdn-luma.com/files/58ab7363888153e3/Illustration%20Exported%20(1).mp4",
+        poster: "/style-previews/iman-2.jpg",
+        defaultPos: { x: 0, y: 8, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+    },
+    {
+        id: 8,
+        video: "https://static.cdn-luma.com/files/58ab7363888153e3/Art%20Direction%20Exported.mp4",
+        poster: "/style-previews/red-statue-1.jpg",
+        defaultPos: { x: 4, y: 8, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+    },
+    {
+        id: 9,
+        video: "https://static.cdn-luma.com/files/58ab7363888153e3/Product%20Video.mp4",
+        poster: "/style-previews/docs-story-1.jpg",
+        defaultPos: { x: 8, y: 8, w: 4, h: 4 },
+        mediaSize: 1,
+        isHovered: false,
+    },
+];
+
+const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
+  ({ className, containerClassName, showRing = true, ...props }, ref) => {
+    const [isFocused, setIsFocused] = React.useState(false);
+    
+    return (
+      <div className={cn(
+        "relative",
+        containerClassName
+      )}>
+        <textarea
+          className={cn(
+            "flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm",
+            "transition-[border-color,background-color,box-shadow] duration-200 ease-in-out",
+            "placeholder:text-muted-foreground",
+            "caret-violet-300",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+            showRing ? "focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0" : "",
+            className
+          )}
+          ref={ref}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setIsFocused(false)}
+          {...props}
+        />
+
+        {isFocused && (
+          <motion.span
+            className="pointer-events-none absolute left-3 right-3 top-1/2 h-9 -translate-y-1/2 rounded-full bg-[radial-gradient(ellipse_at_center,rgba(193,147,255,0.24)_0%,rgba(193,147,255,0.08)_38%,rgba(193,147,255,0)_78%)] blur-xl"
+            initial={{ opacity: 0, scaleX: 0.94 }}
+            animate={{ opacity: 1, scaleX: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+          />
+        )}
+        
+        {showRing && isFocused && (
+          <motion.span 
+            className="absolute inset-0 rounded-md pointer-events-none ring-2 ring-offset-0 ring-violet-500/30"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+          />
+        )}
+
+        {props.onChange && (
+          <div 
+            className="absolute bottom-2 right-2 opacity-0 w-2 h-2 bg-violet-500 rounded-full"
+            style={{
+              animation: 'none',
+            }}
+            id="textarea-ripple"
+          />
+        )}
+      </div>
+    )
+  }
+)
+Textarea.displayName = "Textarea"
+
+const PromptComposer = React.memo(function PromptComposer({
+    activeStyleName,
+    attachments,
+    templatesOpen,
+    onClearStyle,
+    onOpenTemplates,
+    onOpenUpload,
+    onRemoveAttachment,
+    onSubmit,
+}: PromptComposerProps) {
+    const [value, setValue] = useState("");
+    const [showCommandPalette, setShowCommandPalette] = useState(false);
+    const [activeSuggestion, setActiveSuggestion] = useState(-1);
+    const [activeMentionIndex, setActiveMentionIndex] = useState(0);
+    const [creatorMentions, setCreatorMentions] = useState<CreatorMention[]>([]);
+    const [activeSlashCommand, setActiveSlashCommand] = useState<ActiveSlashCommand | null>(null);
+    const [activeComposerMode, setActiveComposerMode] = useState<(typeof COMPOSER_MODES)[number]["label"]>("Prompt");
+    const [hoveredComposerMode, setHoveredComposerMode] = useState<(typeof COMPOSER_MODES)[number]["label"] | null>(null);
+    const [showMentionPalette, setShowMentionPalette] = useState(false);
+    const [mentionStartIndex, setMentionStartIndex] = useState<number | null>(null);
+    const [mentionQuery, setMentionQuery] = useState("");
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const { textareaRef, adjustHeight } = useAutoResizeTextarea({
+        minHeight: 60,
+        maxHeight: 200,
+        value,
+    });
+    const commandPaletteRef = useRef<HTMLDivElement>(null);
+    const mentionPaletteRef = useRef<HTMLDivElement>(null);
+
+    const filteredCreatorMentions = React.useMemo(() => {
+        const query = mentionQuery.trim().toLowerCase();
+        if (!query) return CREATOR_MENTIONS.slice(0, 6);
+        return CREATOR_MENTIONS.filter((creator) => {
+            const haystack = [creator.name, creator.niche, ...creator.keywords].join(" ").toLowerCase();
+            return haystack.includes(query);
+        }).slice(0, 6);
+    }, [mentionQuery]);
+    const visibleComposerMode = hoveredComposerMode ?? activeComposerMode;
+    const shouldShowComposerModes = value.length > 0 || activeSlashCommand !== null;
+
+    useEffect(() => {
+        if (activeSlashCommand) {
+            setShowCommandPalette(false);
+            return;
+        }
+
+        if (value.startsWith("/") && !value.includes(" ")) {
+            setShowCommandPalette(true);
+
+            const matchingSuggestionIndex = COMMAND_SUGGESTIONS.findIndex((cmd) => cmd.prefix.startsWith(value));
+            setActiveSuggestion(matchingSuggestionIndex);
+            return;
+        }
+
+        setShowCommandPalette(false);
+    }, [activeSlashCommand, value]);
+
+    useEffect(() => {
+        if (activeSlashCommand) return;
+        const match = value.match(/^\/(clone|improve)\s+/);
+        if (!match) return;
+        const key = match[1] as SlashCommandKey;
+        setActiveSlashCommand({
+            key,
+            label: SLASH_COMMANDS[key].label,
+            raw: SLASH_COMMANDS[key].raw,
+        });
+        setValue(value.replace(/^\/(clone|improve)\s+/, ""));
+        adjustHeight(true);
+    }, [activeSlashCommand, adjustHeight, value]);
+
+    useEffect(() => {
+        setCreatorMentions((prev) =>
+            prev.filter((creator) => value.toLowerCase().includes(`@${creator.name.toLowerCase()}`))
+        );
+    }, [value]);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            const target = event.target as Node;
+            const commandButton = document.querySelector("[data-command-button]");
+
+            if (
+                commandPaletteRef.current &&
+                !commandPaletteRef.current.contains(target) &&
+                !commandButton?.contains(target)
+            ) {
+                setShowCommandPalette(false);
+            }
+
+            if (mentionPaletteRef.current && !mentionPaletteRef.current.contains(target)) {
+                setShowMentionPalette(false);
+            }
+        };
+
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => {
+            document.removeEventListener("mousedown", handleClickOutside);
+        };
+    }, []);
+
+    const updateMentionStateFromInput = React.useCallback((nextValue: string, caret: number) => {
+        const context = findMentionContext(nextValue, caret);
+        if (!context) {
+            setShowMentionPalette(false);
+            setMentionStartIndex(null);
+            setMentionQuery("");
+            return;
+        }
+
+        setMentionStartIndex(context.start);
+        setMentionQuery(context.query);
+        setShowMentionPalette(true);
+        setActiveMentionIndex(0);
+        setShowCommandPalette(false);
+    }, []);
+
+    const clearComposer = useCallback(() => {
+        setValue("");
+        setCreatorMentions([]);
+        setActiveSlashCommand(null);
+        setShowCommandPalette(false);
+        setShowMentionPalette(false);
+        setMentionStartIndex(null);
+        setMentionQuery("");
+        setActiveSuggestion(-1);
+        setActiveMentionIndex(0);
+        setActiveComposerMode("Prompt");
+        setHoveredComposerMode(null);
+        adjustHeight(true);
+    }, [adjustHeight]);
+
+    const selectCommandSuggestion = useCallback((index: number) => {
+        const selectedCommand = COMMAND_SUGGESTIONS[index];
+        if (!selectedCommand) return;
+        setValue(`${selectedCommand.prefix} `);
+        setShowCommandPalette(false);
+        setShowMentionPalette(false);
+        setActiveSuggestion(index);
+    }, []);
+
+    const selectCreatorMention = React.useCallback((creator: CreatorMention) => {
+        if (mentionStartIndex === null) return;
+
+        const textarea = textareaRef.current;
+        const caret = textarea?.selectionStart ?? value.length;
+        const before = value.slice(0, mentionStartIndex);
+        const after = value.slice(caret);
+        const mentionText = `@${creator.name}`;
+        const spacer = after.startsWith(" ") || after.length === 0 ? "" : " ";
+        const nextValue = `${before}${mentionText}${spacer}${after}`;
+        const nextCaret = before.length + mentionText.length + spacer.length;
+
+        setValue(nextValue);
+        setCreatorMentions((prev) =>
+            prev.some((item) => item.id === creator.id) ? prev : [creator, ...prev]
+        );
+
+        setShowMentionPalette(false);
+        setMentionStartIndex(null);
+        setMentionQuery("");
+
+        window.requestAnimationFrame(() => {
+            textarea?.focus();
+            textarea?.setSelectionRange(nextCaret, nextCaret);
+        });
+    }, [mentionStartIndex, textareaRef, value]);
+
+    const removeCreatorMention = useCallback((creatorId: string) => {
+        setCreatorMentions((prev) => {
+            const creator = prev.find((item) => item.id === creatorId);
+            if (creator) {
+                const escaped = creator.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                setValue((current) =>
+                    current
+                        .replace(new RegExp(`@${escaped}`, "gi"), "")
+                        .replace(/\s{2,}/g, " ")
+                        .trimStart()
+                );
+            }
+
+            return prev.filter((item) => item.id !== creatorId);
+        });
+    }, []);
+
+    const submitComposer = useCallback(() => {
+        if (isSubmitting) return;
+
+        setIsSubmitting(true);
+        void Promise.resolve(
+            onSubmit({
+                message: value.trim(),
+                activeSlashCommand,
+                creatorMentions,
+            })
+        ).then((handled) => {
+            if (handled) {
+                clearComposer();
+            }
+        }).catch(() => {
+            return;
+        }).finally(() => {
+            setIsSubmitting(false);
+        });
+    }, [activeSlashCommand, clearComposer, creatorMentions, isSubmitting, onSubmit, value]);
+
+    const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (activeSlashCommand && e.key === "Backspace") {
+            const el = textareaRef.current;
+            if (el && el.selectionStart === 0 && el.selectionEnd === 0) {
+                e.preventDefault();
+                setActiveSlashCommand(null);
+                return;
+            }
+        }
+
+        if (showMentionPalette && filteredCreatorMentions.length > 0) {
+            if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setActiveMentionIndex((prev) => (prev < filteredCreatorMentions.length - 1 ? prev + 1 : 0));
+                return;
+            }
+            if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setActiveMentionIndex((prev) => (prev > 0 ? prev - 1 : filteredCreatorMentions.length - 1));
+                return;
+            }
+            if (e.key === "Tab" || e.key === "Enter") {
+                e.preventDefault();
+                const creator = filteredCreatorMentions[activeMentionIndex] ?? filteredCreatorMentions[0];
+                if (creator) {
+                    selectCreatorMention(creator);
+                }
+                return;
+            }
+            if (e.key === "Escape") {
+                e.preventDefault();
+                setShowMentionPalette(false);
+                return;
+            }
+        }
+
+        if (showCommandPalette) {
+            if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setActiveSuggestion((prev) => (prev < COMMAND_SUGGESTIONS.length - 1 ? prev + 1 : 0));
+                return;
+            }
+            if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setActiveSuggestion((prev) => (prev > 0 ? prev - 1 : COMMAND_SUGGESTIONS.length - 1));
+                return;
+            }
+            if (e.key === "Tab" || e.key === "Enter") {
+                e.preventDefault();
+                if (activeSuggestion >= 0) {
+                    selectCommandSuggestion(activeSuggestion);
+                }
+                return;
+            }
+            if (e.key === "Escape") {
+                e.preventDefault();
+                setShowCommandPalette(false);
+                return;
+            }
+        }
+
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            const trimmed = value.trim();
+            if (!activeSlashCommand && (trimmed === "/clone" || trimmed === "/improve")) {
+                const key = trimmed.slice(1) as SlashCommandKey;
+                setActiveSlashCommand({ key, label: SLASH_COMMANDS[key].label, raw: SLASH_COMMANDS[key].raw });
+                setValue("");
+                adjustHeight(true);
+                return;
+            }
+
+            if (trimmed || activeSlashCommand) {
+                submitComposer();
+            }
+        }
+    }, [
+        activeMentionIndex,
+        activeSlashCommand,
+        activeSuggestion,
+        adjustHeight,
+        filteredCreatorMentions,
+        selectCommandSuggestion,
+        selectCreatorMention,
+        showCommandPalette,
+        showMentionPalette,
+        submitComposer,
+        textareaRef,
+        value,
+    ]);
+
+    const handleTextareaChange = useCallback((nextValue: string, caret: number) => {
+        setValue(nextValue);
+        updateMentionStateFromInput(nextValue, caret);
+    }, [updateMentionStateFromInput]);
+
+    return (
+        <div className="space-y-4">
+            <motion.div
+                className="relative rounded-[22px] border border-white/12 bg-[linear-gradient(165deg,rgba(24,15,37,0.78)_0%,rgba(10,8,16,0.9)_55%,rgba(8,7,12,0.92)_100%)] shadow-[0_40px_95px_-45px_rgba(194,149,255,0.55)] backdrop-blur-2xl"
+                initial={{ scale: 0.98 }}
+                animate={{ scale: 1 }}
+                transition={{ delay: 0.1 }}
+            >
+                <AnimatePresence>
+                    {showCommandPalette && (
+                        <motion.div
+                            ref={commandPaletteRef}
+                            className="absolute bottom-full left-4 right-4 z-50 mb-2 overflow-hidden rounded-xl border border-white/10 bg-black/85 shadow-2xl backdrop-blur-xl"
+                            initial={{ opacity: 0, y: 5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 5 }}
+                            transition={{ duration: 0.15 }}
+                        >
+                            <div className="bg-black/95 py-1">
+                                {COMMAND_SUGGESTIONS.map((suggestion, index) => {
+                                    const Icon = suggestion.icon;
+
+                                    return (
+                                        <motion.div
+                                            key={suggestion.prefix}
+                                            className={cn(
+                                                "flex cursor-pointer items-center gap-2 px-3 py-2 text-xs transition-colors",
+                                                activeSuggestion === index
+                                                    ? "bg-white/10 text-white"
+                                                    : "text-white/70 hover:bg-white/5"
+                                            )}
+                                            onClick={() => selectCommandSuggestion(index)}
+                                            initial={{ opacity: 0 }}
+                                            animate={{ opacity: 1 }}
+                                            transition={{ delay: index * 0.03 }}
+                                        >
+                                            <div className="flex h-5 w-5 items-center justify-center text-white/60">
+                                                <Icon className="h-4 w-4" />
+                                            </div>
+                                            <div className="font-medium">{suggestion.label}</div>
+                                            <div className="ml-1 text-xs text-white/40">{suggestion.prefix}</div>
+                                        </motion.div>
+                                    );
+                                })}
+                            </div>
+                        </motion.div>
+                    )}
+                    {showMentionPalette && filteredCreatorMentions.length > 0 && (
+                        <motion.div
+                            ref={mentionPaletteRef}
+                            className="absolute bottom-full left-4 right-4 z-[55] mb-2 overflow-hidden rounded-2xl border border-white/12 bg-[linear-gradient(165deg,rgba(18,16,29,0.92)_0%,rgba(10,9,16,0.95)_100%)] shadow-[0_24px_65px_-35px_rgba(175,120,255,0.7)] backdrop-blur-xl"
+                            initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                            transition={{ duration: 0.16, ease: "easeOut" }}
+                        >
+                            <div className="border-b border-white/10 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-white/50">
+                                Mention Creator
+                            </div>
+                            <div className="max-h-64 overflow-y-auto py-1.5">
+                                {filteredCreatorMentions.map((creator, index) => (
+                                    <button
+                                        key={creator.id}
+                                        type="button"
+                                        onMouseEnter={() => setActiveMentionIndex(index)}
+                                        onClick={() => selectCreatorMention(creator)}
+                                        className={cn(
+                                            "flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors",
+                                            activeMentionIndex === index ? "bg-white/[0.08]" : "hover:bg-white/[0.04]"
+                                        )}
+                                    >
+                                        <div className="min-w-0 flex items-center gap-2">
+                                            <CircleUserRound className="h-4 w-4 shrink-0 text-violet-200/90" />
+                                            <div className="min-w-0">
+                                                <div className="truncate text-sm font-medium text-white/92">
+                                                    {creator.name}
+                                                </div>
+                                                <div className="truncate text-xs text-white/48">
+                                                    {creator.niche}
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-white/62">
+                                            @{creator.name.split(" ")[0]?.toLowerCase()}
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
+                <div className="space-y-3 p-4">
+                    <AnimatePresence initial={false}>
+                        {shouldShowComposerModes ? (
+                            <motion.div
+                                initial={{ opacity: 0, y: -8, scale: 0.96 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: -6, scale: 0.98 }}
+                                transition={{ duration: 0.22, ease: "easeOut" }}
+                                className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-full border border-white/10 bg-black/30 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_24px_40px_-32px_rgba(0,0,0,0.92)] backdrop-blur-md"
+                            >
+                                {COMPOSER_MODES.map(({ label, icon: Icon }) => {
+                                    const isActive = visibleComposerMode === label;
+                                    const isSelected = activeComposerMode === label;
+
+                                    return (
+                                        <motion.button
+                                            key={label}
+                                            type="button"
+                                            onClick={() => setActiveComposerMode(label)}
+                                            onMouseEnter={() => setHoveredComposerMode(label)}
+                                            onMouseLeave={() => setHoveredComposerMode(null)}
+                                            onFocus={() => setHoveredComposerMode(label)}
+                                            onBlur={() => setHoveredComposerMode(null)}
+                                            whileTap={{ scale: 0.98 }}
+                                            className={cn(
+                                                "relative inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium tracking-[0.01em] transition-colors focus-visible:outline-none",
+                                                isActive ? "text-white" : "text-white/52 hover:text-white/80",
+                                            )}
+                                        >
+                                            {isActive ? (
+                                                <motion.span
+                                                    layoutId="composer-mode-pill"
+                                                    className="absolute inset-0 rounded-full border border-white/12 bg-white/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                                                    transition={{ type: "spring", stiffness: 360, damping: 30, mass: 0.82 }}
+                                                />
+                                            ) : null}
+                                            <Icon
+                                                className={cn(
+                                                    "relative z-10 h-3.5 w-3.5 transition-colors",
+                                                    isActive ? "text-white/90" : isSelected ? "text-white/58" : "text-white/38",
+                                                )}
+                                            />
+                                            <span className="relative z-10">{label}</span>
+                                        </motion.button>
+                                    );
+                                })}
+                            </motion.div>
+                        ) : null}
+                    </AnimatePresence>
+
+                    <AnimatePresence>
+                        {activeSlashCommand && (
+                            <motion.div
+                                initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                                transition={{ duration: 0.18, ease: "easeOut" }}
+                                className="flex items-center justify-between gap-3 rounded-xl border border-white/12 bg-white/[0.04] px-3 py-2"
+                            >
+                                <div className="min-w-0 flex items-center gap-2">
+                                    <Sparkles className="h-4 w-4 text-violet-200/90" />
+                                    <div className="min-w-0">
+                                        <div className="truncate text-xs font-medium text-white/90">
+                                            {activeSlashCommand.label}
+                                        </div>
+                                        <div className="truncate text-[11px] text-white/45">
+                                            {activeSlashCommand.raw}
+                                        </div>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setActiveSlashCommand(null)}
+                                    className="rounded-lg p-1 text-white/50 transition-colors hover:bg-white/10 hover:text-white/80"
+                                    aria-label="Remove command"
+                                >
+                                    <XIcon className="h-4 w-4" />
+                                </button>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
+                    <AnimatePresence>
+                        {creatorMentions.length > 0 && (
+                            <motion.div
+                                initial={{ opacity: 0, y: 6, scale: 0.99 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: 6, scale: 0.99 }}
+                                transition={{ duration: 0.16, ease: "easeOut" }}
+                                className="flex flex-wrap items-center gap-2 rounded-xl border border-violet-300/25 bg-[linear-gradient(165deg,rgba(109,61,188,0.22)_0%,rgba(61,33,107,0.15)_100%)] px-3 py-2"
+                            >
+                                {creatorMentions.map((creator) => (
+                                    <div
+                                        key={creator.id}
+                                        className="group inline-flex items-center gap-2 rounded-full border border-violet-200/30 bg-black/30 px-3 py-1 text-xs text-violet-100 shadow-[0_0_0_1px_rgba(168,85,247,0.22)]"
+                                    >
+                                        <CircleUserRound className="h-3.5 w-3.5 text-violet-200/90" />
+                                        <span className="font-medium">@{creator.name}</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => removeCreatorMention(creator.id)}
+                                            className="text-violet-200/65 transition-colors hover:text-white"
+                                            aria-label={`Remove ${creator.name} mention`}
+                                        >
+                                            <XIcon className="h-3 w-3" />
+                                        </button>
+                                    </div>
+                                ))}
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
+                    <Textarea
+                        ref={textareaRef}
+                        value={value}
+                        onChange={(e) => {
+                            handleTextareaChange(
+                                e.target.value,
+                                e.target.selectionStart ?? e.target.value.length
+                            );
+                        }}
+                        onSelect={(e) => {
+                            const target = e.currentTarget;
+                            updateMentionStateFromInput(target.value, target.selectionStart ?? target.value.length);
+                        }}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Describe your video or add notes..."
+                        containerClassName="w-full"
+                        className={cn(
+                            "min-h-[60px] w-full resize-none px-4 py-3",
+                            "border-none bg-transparent",
+                            "text-[15px] font-normal leading-7 tracking-[0.008em] text-white",
+                            "focus:outline-none",
+                            "placeholder:text-white/30"
+                        )}
+                        style={{
+                            overflow: "hidden",
+                            fontFamily:
+                                '"SF Pro Text","SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",sans-serif',
+                        }}
+                        showRing={false}
+                    />
+                </div>
+
+                <AnimatePresence>
+                    {(attachments.length > 0 || !!activeStyleName) && (
+                        <motion.div
+                            className="flex flex-wrap gap-2 px-4 pb-3"
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: "auto" }}
+                            exit={{ opacity: 0, height: 0 }}
+                        >
+                            {activeStyleName && (
+                                <motion.div
+                                    className="flex items-center gap-2 rounded-lg border border-white/15 bg-white/[0.06] px-3 py-1.5 text-xs text-white/80"
+                                    initial={{ opacity: 0, scale: 0.9 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    exit={{ opacity: 0, scale: 0.9 }}
+                                >
+                                    <span>Style: {activeStyleName}</span>
+                                    <button
+                                        type="button"
+                                        onClick={onClearStyle}
+                                        className="text-white/40 transition-colors hover:text-white"
+                                        aria-label="Clear style"
+                                    >
+                                        <XIcon className="h-3 w-3" />
+                                    </button>
+                                </motion.div>
+                            )}
+                            {attachments.map((file, index) => (
+                                <motion.div
+                                    key={`${file}-${index}`}
+                                    className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-3 py-1.5 text-xs text-white/70"
+                                    initial={{ opacity: 0, scale: 0.9 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    exit={{ opacity: 0, scale: 0.9 }}
+                                >
+                                    <span>{file}</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => onRemoveAttachment(index)}
+                                        className="text-white/40 transition-colors hover:text-white"
+                                    >
+                                        <XIcon className="h-3 w-3" />
+                                    </button>
+                                </motion.div>
+                            ))}
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
+                <div className="flex items-center justify-between gap-4 border-t border-white/[0.08] p-4">
+                    <div className="flex items-center gap-3">
+                        <motion.button
+                            type="button"
+                            onClick={onOpenUpload}
+                            whileTap={{ scale: 0.94 }}
+                            className="group relative rounded-lg p-2 text-white/40 transition-colors hover:text-white/90"
+                            title="Upload source"
+                        >
+                            <FileUp className="h-4 w-4" />
+                            <motion.span
+                                className="absolute inset-0 rounded-lg bg-white/[0.05] opacity-0 transition-opacity group-hover:opacity-100"
+                                layoutId="button-highlight"
+                            />
+                        </motion.button>
+                        <motion.button
+                            type="button"
+                            onClick={onOpenTemplates}
+                            whileTap={{ scale: 0.94 }}
+                            className={cn(
+                                "group relative rounded-lg p-2 text-white/40 transition-colors hover:text-white/90",
+                                templatesOpen && "bg-white/10 text-white/90"
+                            )}
+                            title="Templates and styles"
+                        >
+                            <Grid3X3 className="h-4 w-4" />
+                            <motion.span
+                                className="absolute inset-0 rounded-lg bg-white/[0.05] opacity-0 transition-opacity group-hover:opacity-100"
+                                layoutId="button-highlight"
+                            />
+                        </motion.button>
+                        <motion.button
+                            type="button"
+                            data-command-button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setShowCommandPalette((prev) => !prev);
+                            }}
+                            whileTap={{ scale: 0.94 }}
+                            className={cn(
+                                "group relative rounded-lg p-2 text-white/40 transition-colors hover:text-white/90",
+                                showCommandPalette && "bg-white/10 text-white/90"
+                            )}
+                        >
+                            <Command className="h-4 w-4" />
+                            <motion.span
+                                className="absolute inset-0 rounded-lg bg-white/[0.05] opacity-0 transition-opacity group-hover:opacity-100"
+                                layoutId="button-highlight"
+                            />
+                        </motion.button>
+                    </div>
+
+                    <motion.button
+                        type="button"
+                        onClick={submitComposer}
+                        whileHover={{ scale: 1.01 }}
+                        whileTap={{ scale: 0.98 }}
+                        disabled={isSubmitting || (!value.trim() && !activeSlashCommand && attachments.length === 0)}
+                        className={cn(
+                            "flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all",
+                            isSubmitting
+                                ? "bg-white/80 text-[#0A0A0B] shadow-lg shadow-white/8"
+                                : (value.trim() || activeSlashCommand || attachments.length > 0)
+                                ? "bg-white text-[#0A0A0B] shadow-lg shadow-white/10"
+                                : "bg-white/[0.05] text-white/40"
+                        )}
+                    >
+                        {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <SendIcon className="h-4 w-4" />}
+                        <span>{isSubmitting ? "Sending..." : "Send"}</span>
+                    </motion.button>
+                </div>
+            </motion.div>
+
+            <div className="flex flex-wrap items-center justify-center gap-2">
+                {COMMAND_SUGGESTIONS.map((suggestion, index) => {
+                    const Icon = suggestion.icon;
+
+                    return (
+                        <motion.button
+                            key={suggestion.prefix}
+                            type="button"
+                            onClick={() => selectCommandSuggestion(index)}
+                            className="group relative flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white/65 transition-all hover:bg-white/[0.06] hover:text-white/90"
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: index * 0.1 }}
+                        >
+                            <Icon className="h-4 w-4" />
+                            <span>{suggestion.label}</span>
+                            <motion.div
+                                className="absolute inset-0 rounded-xl border border-white/[0.06]"
+                                initial={false}
+                                animate={{
+                                    opacity: [0, 1],
+                                    scale: [0.98, 1],
+                                }}
+                                transition={{
+                                    duration: 0.3,
+                                    ease: "easeOut",
+                                }}
+                            />
+                        </motion.button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+});
+
+export function VideoUploadInterface() {
+    const router = useRouter();
+    const [showFileUploadModal, setShowFileUploadModal] = useState(false);
+    const [uploadedFileName, setUploadedFileName] = useState<string>("");
+    const uploadInspectionRunRef = useRef(0);
+    const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
+    const [addSourceMode, setAddSourceMode] = useState<"link" | "upload">("link");
+    const [isSourceDragOver, setIsSourceDragOver] = useState(false);
+    const sourceFileInputRef = useRef<HTMLInputElement>(null);
+    const [attachments, setAttachments] = useState<string[]>([]);
+    const submitCooldownTimerRef = useRef<number | null>(null);
+    const submitLockRef = useRef(false);
+    const launchNavigationTimerRef = useRef<number | null>(null);
+
+    const [templatesOpen, setTemplatesOpen] = useState(false);
+    const [airtableStylePreviews, setAirtableStylePreviews] = useState<Record<string, string[]>>({});
+    const [hasLoadedAirtableStylePreviews, setHasLoadedAirtableStylePreviews] = useState(false);
+    const [isLoadingAirtableStylePreviews, setIsLoadingAirtableStylePreviews] = useState(false);
+    const [failedImages, setFailedImages] = useState<Record<string, true>>({});
+    const [activeStyleId, setActiveStyleId] = useState<string | null>(null);
+    const [showInspirationWall, setShowInspirationWall] = useState(false);
+    const [editorLaunchOverlay, setEditorLaunchOverlay] = useState<{
+        title: string;
+        detail: string;
+    } | null>(null);
+
+    const [sourceUrl, setSourceUrl] = useState("");
+    const {
+        previewKind: stagedSourcePreviewKind,
+        sourceAssetId: stagedSourceAssetId,
+        sourceFile: stagedSourceFile,
+        sourceProfile: stagedSourceProfile,
+        stageSource,
+        awaitSettledSource,
+        resetStage: resetStagedSource,
+    } = useSourceStage({
+        currentPreviewUrl: null,
+        currentPreviewKind: null,
+    });
+
+    const activeStyle = React.useMemo(
+        () => STYLE_TEMPLATES.find((s) => s.id === activeStyleId) ?? null,
+        [activeStyleId]
+    );
+    const sourceUrlValue = sourceUrl.trim();
+    const pendingSourceProfile = pendingUpload?.sourceProfile ?? null;
+    const pendingSourceMetrics = pendingSourceProfile ? formatSourceProfileMetric(pendingSourceProfile) : null;
+    const sourceReady = addSourceMode === "upload" ? !!pendingUpload : sourceUrlValue.length > 0;
+    const sourceDisplayName = pendingUpload?.file.name
+        ?? (sourceUrlValue.length > 0 ? sourceUrlValue.replace(/^https?:\/\//, "") : "Drop a clip to stage it here");
+    const sourcePrimaryBadge = pendingUpload?.kind
+        ? pendingUpload.kind.toUpperCase()
+        : addSourceMode === "link"
+            ? "URL"
+            : "VIDEO";
+    const sourceDetail = pendingUpload
+        ? pendingUpload.inspectionState === "inspecting"
+            ? "Inspecting file locally"
+            : pendingUpload.inspectionState === "failed"
+                ? pendingUpload.inspectionError ?? formatFileSize(pendingUpload.file.size)
+                : pendingSourceProfile
+                    ? `${pendingSourceMetrics?.resolution ?? formatFileSize(pendingUpload.file.size)} · ${formatTimeProfile(pendingSourceProfile.timeProfile)}`
+                    : formatFileSize(pendingUpload.file.size)
+        : sourceUrlValue.length > 0
+            ? "Remote source detected"
+            : "Waiting for a source";
+    const sourceExtension = pendingUpload?.file.name.split(".").pop()?.toUpperCase()
+        ?? (addSourceMode === "link" ? "URL" : "MP4");
+    const uploadStudioTabs = [
+        { label: "Source Map", icon: Upload },
+        { label: "Preview Deck", icon: MonitorIcon },
+        { label: "Delivery", icon: SendIcon },
+    ];
+    const uploadStudioVitals = [
+        pendingSourceProfile
+            ? { label: "Format", value: pendingSourceMetrics?.resolution ?? sourceExtension, meta: formatAspectFamily(pendingSourceProfile.aspectFamily) }
+            : { label: "Format", value: sourceExtension, meta: sourcePrimaryBadge },
+        pendingSourceProfile
+            ? { label: "Runtime", value: pendingSourceMetrics?.duration ?? "Unknown duration", meta: formatDurationBucket(pendingSourceProfile.durationBucket) }
+            : { label: "Mode", value: addSourceMode === "upload" ? "Upload" : "Link", meta: sourceReady ? "Preview armed" : "Signal standby" },
+        pendingSourceProfile
+            ? { label: "Weight", value: formatWeightBucket(pendingSourceProfile.weightBucket), meta: formatProcessingClass(pendingSourceProfile.processingClass) }
+            : { label: "State", value: sourceReady ? "Live" : "Idle", meta: "Source signal" },
+        pendingSourceProfile
+            ? { label: "Audio", value: pendingSourceMetrics?.audio ?? "Audio unknown", meta: formatSourceOrientation(pendingSourceProfile.inspection.orientation) }
+            : { label: "Shell", value: "Phonk", meta: "Neo dashboard" },
+    ];
+    const uploadStudioStages = [
+        { label: "Source", meta: sourceReady ? "Signal armed" : "Awaiting clip", icon: Upload },
+        { label: "Preview", meta: "Central board", icon: MonitorIcon },
+        { label: "Attach", meta: "Prompt ready", icon: ArrowUpIcon },
+    ];
+    const uploadStudioUtilities = [
+        { label: "Clip Dock", icon: Paperclip },
+        { label: "Frames", icon: Film },
+        { label: "Prompt", icon: ArrowUpIcon },
+    ];
+    const useGlassUploadPopup = true;
+
+    useEffect(() => {
+        const id = getActiveStyleId();
+        setActiveStyleId(id && id.length > 0 ? id : null);
+    }, []);
+
+    useEffect(() => {
+        if (process.env.NODE_ENV !== "development") return;
+        if (typeof window === "undefined") return;
+
+        const w = window as unknown as { __airtableVerifyChecklistLogged?: boolean };
+        if (w.__airtableVerifyChecklistLogged) return;
+        w.__airtableVerifyChecklistLogged = true;
+
+        console.log(
+            [
+                "[Airtable] Run and verify:",
+                "1) Verify health: open /api/airtable/health",
+                "2) Verify items: open /api/airtable/images?limit=5",
+                "3) UI: open Templates and Styles modal, look for Airtable/Local badge",
+            ].join("\n")
+        );
+    }, []);
+
+    useEffect(() => {
+        if (!templatesOpen || hasLoadedAirtableStylePreviews) return;
+
+        const cached = readAirtableStylePreviewCache();
+        if (cached) {
+            setAirtableStylePreviews(cached);
+            setHasLoadedAirtableStylePreviews(true);
+            return;
+        }
+
+        let cancelled = false;
+        setIsLoadingAirtableStylePreviews(true);
+
+        void fetchAirtableStylePreviewArchive()
+            .then((nextPreviews) => {
+                if (cancelled) return;
+                setAirtableStylePreviews(nextPreviews);
+                setHasLoadedAirtableStylePreviews(true);
+            })
+            .finally(() => {
+                if (cancelled) return;
+                setIsLoadingAirtableStylePreviews(false);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [hasLoadedAirtableStylePreviews, templatesOpen]);
+
+    useEffect(() => {
+        return () => {
+            if (pendingUpload?.previewUrl) {
+                URL.revokeObjectURL(pendingUpload.previewUrl);
+            }
+        };
+    }, [pendingUpload?.previewUrl]);
+
+    useEffect(() => {
+        return () => {
+            if (submitCooldownTimerRef.current !== null) {
+                window.clearTimeout(submitCooldownTimerRef.current);
+                submitCooldownTimerRef.current = null;
+            }
+        };
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (launchNavigationTimerRef.current !== null) {
+                window.clearTimeout(launchNavigationTimerRef.current);
+                launchNavigationTimerRef.current = null;
+            }
+        };
+    }, []);
+
+    useEffect(() => {
+        const warmProject = getMostRecentProject();
+        if (warmProject) {
+            void router.prefetch(`/editor/${warmProject.id}`);
+            return;
+        }
+
+        void router.prefetch("/editor/__new__");
+    }, [router]);
+
+    const addSourceChip = (label: string) => {
+        const trimmed = label.trim();
+        if (!trimmed) return;
+        setAttachments((prev) => (prev.includes(trimmed) ? prev : [trimmed, ...prev]));
+    };
+
+    const handleComposerSubmit = useCallback(async (payload: PromptComposerSubmitPayload) => {
+        if (submitLockRef.current) return false;
+
+        const { message, activeSlashCommand, creatorMentions } = payload;
+        const uploadedSourceLabel = uploadedFileName?.trim().length > 0
+            ? uploadedFileName.replace(/\.[^/.]+$/, "")
+            : "the attached source";
+        const hasAttachedSource = attachments.length > 0 || uploadedFileName.trim().length > 0;
+        const styleHint = creatorMentions.length
+            ? ` Style reference creators: ${creatorMentions.map((creator) => creator.name).join(", ")}.`
+            : "";
+        const prompt = activeSlashCommand
+            ? `${activeSlashCommand.raw}${message ? ` ${message}` : ""}`
+            : message.trim().length > 0
+                ? `${message}${styleHint}`
+                : hasAttachedSource
+                    ? `Start with ${uploadedSourceLabel}.${styleHint}`.trim()
+                    : "";
+        if (!prompt && !hasAttachedSource) return false;
+
+        submitLockRef.current = true;
+        if (submitCooldownTimerRef.current !== null) {
+            window.clearTimeout(submitCooldownTimerRef.current);
+        }
+
+        const nextProjectTitle =
+            uploadedFileName?.trim().length > 0
+                ? uploadedFileName.replace(/\.[^/.]+$/, "")
+                : (message || activeSlashCommand?.label || prompt).slice(0, 28);
+        let resolvedPreviewKind = stagedSourcePreviewKind ?? null;
+        let resolvedSourceAssetId = stagedSourceAssetId ?? null;
+        let resolvedSourceProfile = stagedSourceProfile ?? null;
+        const launchProjectTitle = nextProjectTitle || "PROMETHEUS Project";
+        const launchDetail =
+            stagedSourceFile || resolvedSourceAssetId || uploadedFileName.trim().length > 0
+                ? "Finalizing your upload and opening the editor."
+                : "Opening the editor workspace.";
+
+        setEditorLaunchOverlay({
+            title: launchProjectTitle,
+            detail: launchDetail,
+        });
+        await waitForNextPaint();
+
+        try {
+            if (!resolvedSourceAssetId && stagedSourceFile) {
+                const settledSource = await awaitSettledSource();
+                if (!settledSource?.assetId) {
+                    setEditorLaunchOverlay(null);
+                    submitLockRef.current = false;
+                    if (submitCooldownTimerRef.current !== null) {
+                        window.clearTimeout(submitCooldownTimerRef.current);
+                        submitCooldownTimerRef.current = null;
+                    }
+                    if (launchNavigationTimerRef.current !== null) {
+                        window.clearTimeout(launchNavigationTimerRef.current);
+                        launchNavigationTimerRef.current = null;
+                    }
+                    toast.error("The uploaded video did not finish staging. Please upload it again.");
+                    return false;
+                }
+
+                resolvedSourceAssetId = settledSource.assetId;
+                resolvedPreviewKind = settledSource.previewKind ?? resolvedPreviewKind;
+                resolvedSourceProfile = settledSource.sourceProfile ?? resolvedSourceProfile;
+            }
+
+            const project = createProject({
+                title: nextProjectTitle || "PROMETHEUS Project",
+                previewKind: resolvedPreviewKind ?? undefined,
+                sourceProfile: resolvedSourceProfile ?? undefined,
+                sourceAssetId: resolvedSourceAssetId ?? undefined,
+            });
+
+            if (stagedSourceFile && (resolvedPreviewKind === "video" || resolvedPreviewKind === "image")) {
+                setSessionSourcePreview({
+                    projectId: project.id,
+                    file: stagedSourceFile,
+                    previewKind: resolvedPreviewKind,
+                    sourceAssetId: resolvedSourceAssetId,
+                });
+            }
+
+            const nextJob = createProcessingJob({
+                projectId: project.id,
+                input: {
+                    prompt,
+                    sources: [
+                        ...attachments,
+                        ...creatorMentions.map((creator) => `Creator: ${creator.name}`),
+                    ],
+                    styleId: activeStyleId ?? undefined,
+                },
+            });
+            persistStartProcessing(nextJob);
+            const editorRoute = `/editor/${project.id}`;
+            rememberCurrentPathForEditorReturn();
+            markPendingEditorNavigation(editorRoute);
+            if (launchNavigationTimerRef.current !== null) {
+                window.clearTimeout(launchNavigationTimerRef.current);
+                launchNavigationTimerRef.current = null;
+            }
+            void router.prefetch(editorRoute);
+            if (SHOULD_USE_EDITOR_NAVIGATION_FALLBACK) {
+                launchNavigationTimerRef.current = window.setTimeout(() => {
+                    const pendingEditorRoute = getPendingEditorNavigation();
+                    if (pendingEditorRoute !== editorRoute) {
+                        return;
+                    }
+
+                    if (window.location.pathname !== editorRoute) {
+                        window.location.assign(editorRoute);
+                    }
+                }, EDITOR_NAVIGATION_FALLBACK_DELAY_MS);
+            }
+            React.startTransition(() => {
+                router.push(editorRoute);
+            });
+        } catch (error) {
+            setEditorLaunchOverlay(null);
+            submitLockRef.current = false;
+            clearPendingEditorNavigation();
+            if (submitCooldownTimerRef.current !== null) {
+                window.clearTimeout(submitCooldownTimerRef.current);
+                submitCooldownTimerRef.current = null;
+            }
+            if (launchNavigationTimerRef.current !== null) {
+                window.clearTimeout(launchNavigationTimerRef.current);
+                launchNavigationTimerRef.current = null;
+            }
+            if (process.env.NODE_ENV === "development") {
+                console.warn("Failed to launch editor from the upload composer.", error);
+            }
+            return false;
+        }
+
+        submitCooldownTimerRef.current = window.setTimeout(() => {
+            submitLockRef.current = false;
+            submitCooldownTimerRef.current = null;
+        }, 600);
+
+        return true;
+    }, [
+        activeStyleId,
+        attachments,
+        router,
+        awaitSettledSource,
+        uploadedFileName,
+        stagedSourceAssetId,
+        stagedSourceFile,
+        stagedSourcePreviewKind,
+        stagedSourceProfile,
+    ]);
+
+    const openUploadComposer = useCallback(() => {
+        setAddSourceMode("upload");
+        setShowFileUploadModal(true);
+    }, []);
+
+    const clearActiveStyle = useCallback(() => {
+        setActiveStyleId(null);
+        persistActiveStyleId(null);
+    }, []);
+
+    const clearPendingUpload = () => {
+        uploadInspectionRunRef.current += 1;
+        setPendingUpload((prev) => {
+            if (prev?.previewUrl) {
+                URL.revokeObjectURL(prev.previewUrl);
+            }
+            return null;
+        });
+    };
+
+    const closeSourceModal = () => {
+        setShowFileUploadModal(false);
+        clearPendingUpload();
+        setAddSourceMode("link");
+        setSourceUrl("");
+        setIsSourceDragOver(false);
+    };
+
+    const handleUploadSelection = async (files: File[]) => {
+        if (files.length === 0) return;
+        const file = files[0]!;
+        const previewUrl = URL.createObjectURL(file);
+        const kind = detectUploadKind(file);
+        const inspectionRunId = uploadInspectionRunRef.current + 1;
+        uploadInspectionRunRef.current = inspectionRunId;
+
+        setPendingUpload((prev) => {
+            if (prev?.previewUrl) {
+                URL.revokeObjectURL(prev.previewUrl);
+            }
+            return {
+                file,
+                previewUrl,
+                kind,
+                sourceProfile: null,
+                inspectionState: kind === "video" || kind === "image" || kind === "audio" ? "inspecting" : "ready",
+                inspectionError: null,
+            };
+        });
+
+        if (kind !== "video" && kind !== "image" && kind !== "audio") {
+            return;
+        }
+
+        try {
+            const sourceProfile = await inspectSourceFile(file);
+
+            if (uploadInspectionRunRef.current !== inspectionRunId) return;
+
+            setPendingUpload((prev) => {
+                if (!prev || prev.file !== file) return prev;
+                return {
+                    ...prev,
+                    sourceProfile,
+                    inspectionState: "ready",
+                    inspectionError: null,
+                };
+            });
+        } catch (error) {
+            if (uploadInspectionRunRef.current !== inspectionRunId) return;
+
+            setPendingUpload((prev) => {
+                if (!prev || prev.file !== file) return prev;
+                return {
+                    ...prev,
+                    inspectionState: "failed",
+                    inspectionError: error instanceof Error ? error.message : "Unable to inspect this file locally",
+                };
+            });
+        }
+    };
+
+    const applyUploadToPrompt = () => {
+        if (!pendingUpload) return;
+        setUploadedFileName(pendingUpload.file.name);
+        void stageSource(pendingUpload.file, {
+            sourceProfile: pendingUpload.sourceProfile ?? null,
+        });
+        addSourceChip(`Upload: ${pendingUpload.file.name}`);
+        closeSourceModal();
+    };
+
+    const removeAttachment = (index: number) => {
+        setAttachments((prev) => {
+            const target = prev[index] ?? "";
+            if (target.startsWith("Upload: ")) {
+                setUploadedFileName("");
+                resetStagedSource();
+            }
+            return prev.filter((_, i) => i !== index);
+        });
+    };
+
+    const importSourceLink = () => {
+        const raw = sourceUrl.trim();
+        if (!raw) return;
+
+        const normalized = raw.startsWith("http://") || raw.startsWith("https://")
+            ? raw
+            : `https://${raw}`;
+
+        try {
+            const parsed = new URL(normalized);
+            addSourceChip(`Link: ${parsed.hostname.replace(/^www\./, "")}`);
+        } catch {
+            addSourceChip("Link imported");
+        }
+
+        closeSourceModal();
+    };
+
+    const handleSourceFileInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(event.target.files ?? []);
+        handleUploadSelection(files);
+        event.target.value = "";
+    };
+
+    const handleSourceDrop = (event: React.DragEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        setIsSourceDragOver(false);
+        const files = Array.from(event.dataTransfer.files ?? []);
+        handleUploadSelection(files);
+    };
+
+    return (
+        <div className="relative min-h-full w-full overflow-hidden bg-transparent px-4 py-10 text-white sm:px-6 sm:py-12">
+            <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                <div className="absolute -top-40 left-[15%] h-80 w-80 rounded-full bg-violet-500/14 blur-[130px]" />
+                <div className="absolute top-[18%] right-[10%] h-72 w-72 rounded-full bg-fuchsia-500/10 blur-[120px]" />
+                <div className="absolute bottom-[-140px] left-1/2 h-96 w-96 -translate-x-1/2 rounded-full bg-indigo-400/10 blur-[150px]" />
+            </div>
+            <div className="relative mx-auto w-full max-w-4xl">
+                <motion.div
+                    className="relative z-10 space-y-10"
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.6, ease: "easeOut" }}
+                >
+                    <motion.div
+                        className="flex flex-col items-center gap-4 pt-2 text-center"
+                        initial={{ opacity: 0, y: 14 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.12, duration: 0.45 }}
+                    >
+                        <InteractiveOrb size={118} intensity="vivid" />
+                        <TextEffect
+                            as="h1"
+                            per="word"
+                            preset="slide"
+                            delay={0.08}
+                            className="text-[29px] font-medium tracking-tight text-white/95 sm:text-[34px]"
+                        >
+                            Ready to Create Something New?
+                        </TextEffect>
+                        <TextEffect
+                            as="p"
+                            per="word"
+                            preset="fade"
+                            delay={0.28}
+                            className="max-w-lg text-sm text-white/55"
+                        >
+                            Prompt your project, attach sources, and shape the edit flow in one place.
+                        </TextEffect>
+                    </motion.div>
+
+                    <PromptComposer
+                        activeStyleName={activeStyle?.name ?? null}
+                        attachments={attachments}
+                        templatesOpen={templatesOpen}
+                        onClearStyle={clearActiveStyle}
+                        onOpenTemplates={() => setTemplatesOpen(true)}
+                        onOpenUpload={openUploadComposer}
+                        onRemoveAttachment={removeAttachment}
+                        onSubmit={handleComposerSubmit}
+                    />
+
+                    <div className="space-y-4">
+                        <div className="flex flex-wrap items-center justify-center gap-2">
+                            <motion.button
+                                type="button"
+                                onClick={() => setShowInspirationWall((prev) => !prev)}
+                                className={cn(
+                                    "group relative flex items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-all",
+                                    showInspirationWall
+                                        ? "border-[#a979ef]/45 bg-[#7a46bc]/22 text-white"
+                                        : "border-white/10 bg-white/[0.03] text-white/65 hover:bg-white/[0.06] hover:text-white/90"
+                                )}
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ delay: COMMAND_SUGGESTIONS.length * 0.1 }}
+                            >
+                                <PanelsTopLeft className="h-4 w-4" />
+                                <span>{showInspirationWall ? "Hide Showcase" : "Reveal Showcase"}</span>
+                                <motion.div
+                                    className="absolute inset-0 rounded-xl border border-white/[0.08]"
+                                    initial={false}
+                                    animate={{
+                                        opacity: showInspirationWall ? 1 : 0.7,
+                                        scale: [0.98, 1],
+                                    }}
+                                    transition={{
+                                        duration: 0.3,
+                                        ease: "easeOut",
+                                    }}
+                                />
+                            </motion.button>
+                        </div>
+
+                        <AnimatePresence>
+                            {showInspirationWall && (
+                                <motion.div
+                                    initial={{ opacity: 0, y: 16, scale: 0.98 }}
+                                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                                    exit={{ opacity: 0, y: 16, scale: 0.98 }}
+                                    transition={{ duration: 0.26, ease: "easeOut" }}
+                                    className="overflow-hidden rounded-2xl border border-white/12 bg-[linear-gradient(165deg,rgba(16,11,25,0.86)_0%,rgba(8,7,13,0.93)_100%)] shadow-[0_35px_90px_-45px_rgba(185,134,255,0.48)] backdrop-blur-xl"
+                                >
+                                    <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                                        <div>
+                                            <div className="text-sm font-medium text-white/92">Dynamic Inspiration Wall</div>
+                                            <div className="text-xs text-white/55">
+                                                Hover tiles to expand and inspect motion styling.
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowInspirationWall(false)}
+                                            className="rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-white/65 transition-colors hover:text-white"
+                                        >
+                                            Close
+                                        </button>
+                                    </div>
+                                    <div className="h-[360px] p-2 sm:h-[430px] md:h-[500px]">
+                                        <DynamicFrameLayout
+                                            frames={DEMO_FRAMES}
+                                            className="h-full w-full"
+                                            hoverSize={6}
+                                            gapSize={4}
+                                        />
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+                    </div>
+                </motion.div>
+            </div>
+
+            {/* ADD SOURCE MODAL */}
+            <Dialog
+                open={showFileUploadModal}
+                onOpenChange={(open) => {
+                    setShowFileUploadModal(open);
+                    if (!open) closeSourceModal();
+                }}
+            >
+                <DialogContent className="w-[calc(100vw-1rem)] max-w-[1040px] max-h-[calc(100svh-1rem)] overflow-hidden border-0 bg-transparent p-0 shadow-none sm:w-[calc(100vw-2rem)] sm:max-h-[calc(100svh-2rem)] [&>button[aria-label='Close']]:hidden">
+                    <DialogClose asChild>
+                        <button
+                            type="button"
+                            className="absolute right-3 top-3 z-20 grid h-10 w-10 place-items-center rounded-lg border border-white/12 bg-black/55 text-white/70 shadow-[0_18px_42px_-26px_rgba(0,0,0,0.92)] backdrop-blur-xl transition-colors hover:bg-black/72 hover:text-white sm:right-5 sm:top-5"
+                            aria-label="Close source popup"
+                        >
+                            <XIcon className="h-5 w-5" />
+                        </button>
+                    </DialogClose>
+
+                    {useGlassUploadPopup ? (
+                        <GlassUploadModalView
+                            addSourceMode={addSourceMode}
+                            isSourceDragOver={isSourceDragOver}
+                            onApplyUploadToPrompt={applyUploadToPrompt}
+                            onClearPendingUpload={clearPendingUpload}
+                            onImportSourceLink={importSourceLink}
+                            onModeChange={setAddSourceMode}
+                            onSourceDragLeave={() => setIsSourceDragOver(false)}
+                            onSourceDragOver={(event) => {
+                                event.preventDefault();
+                                setIsSourceDragOver(true);
+                            }}
+                            onSourceDrop={handleSourceDrop}
+                            onSourceFileInputChange={handleSourceFileInputChange}
+                            onSourceUrlChange={setSourceUrl}
+                            pendingUpload={pendingUpload}
+                            sourceDetail={sourceDetail}
+                            sourceDisplayName={sourceDisplayName}
+                            sourceExtension={sourceExtension}
+                            sourceFileInputRef={sourceFileInputRef}
+                            sourcePrimaryBadge={sourcePrimaryBadge}
+                            sourceReady={sourceReady}
+                            sourceUrl={sourceUrl}
+                            sourceUrlValue={sourceUrlValue}
+                        />
+                    ) : (
+                    <div className="relative flex max-h-[calc(100svh-1rem)] flex-col overflow-hidden rounded-[40px] border border-[#6d685f] bg-[linear-gradient(180deg,#67625b_0%,#5b5650_100%)] p-2 shadow-[0_56px_140px_-54px_rgba(0,0,0,0.98)] sm:max-h-[calc(100svh-2rem)] sm:rounded-[54px] sm:p-3">
+                        <div
+                            aria-hidden
+                            className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.16)_0%,rgba(255,255,255,0)_34%)]"
+                        />
+                        <div
+                            aria-hidden
+                            className="pointer-events-none absolute inset-x-20 top-0 h-24 bg-[radial-gradient(circle_at_center,rgba(242,255,74,0.18)_0%,rgba(242,255,74,0)_72%)]"
+                        />
+
+                        <DialogHeader className="relative shrink-0 p-0">
+                            <motion.div
+                                initial={{ opacity: 0, y: 16, filter: "blur(8px)" }}
+                                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                                transition={{ duration: 0.48, ease: [0.22, 1, 0.36, 1] }}
+                                className="relative overflow-hidden rounded-[30px] bg-[linear-gradient(180deg,#635f58_0%,#5a554f_100%)] px-4 pb-5 pt-4 sm:rounded-[36px] sm:px-6 sm:pb-6 sm:pt-5"
+                            >
+                                <div
+                                    aria-hidden
+                                    className="pointer-events-none absolute inset-x-6 top-0 h-px bg-white/10"
+                                />
+                                <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+                                    <div className="max-w-xl">
+                                        <DialogTitle className="text-[30px] font-medium tracking-tight text-[#f5f2ea] sm:text-[38px]">
+                                        Upload Studio
+                                    </DialogTitle>
+                                        <DialogDescription className="mt-2 max-w-2xl text-sm leading-6 text-[#d9d4cb]">
+                                            Stage the source inside a structured preview board before it is attached to the prompt.
+                                    </DialogDescription>
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-2 xl:justify-end">
+                                        {uploadStudioTabs.map(({ label, icon: Icon }) => (
+                                            <span
+                                                key={label}
+                                                className="inline-flex items-center gap-2 rounded-full border border-[#d0cbc0] bg-[#f7f4ec] px-4 py-2 text-[11px] font-medium text-[#2f302b] shadow-[inset_0_1px_0_rgba(255,255,255,0.96)]"
+                                            >
+                                                <Icon className="h-3.5 w-3.5 text-[#666158]" />
+                                                {label}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            </motion.div>
+                        </DialogHeader>
+
+                        <div className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[linear-gradient(180deg,#d8d5cd_0%,#cfcbc2_100%)] px-3 py-3 sm:px-5 sm:py-5">
+                            <motion.div
+                                initial={{ opacity: 0, y: 16, filter: "blur(10px)" }}
+                                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                                transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+                                className="relative min-h-[820px] rounded-[34px] border border-[#bdb8ae] bg-[linear-gradient(180deg,#e6e3db_0%,#ddd9d0_100%)] px-4 pb-24 pt-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.92)] sm:rounded-[40px] sm:px-6 sm:pb-28 sm:pt-6"
+                            >
+                                <div
+                                    aria-hidden
+                                    className="pointer-events-none absolute inset-x-0 top-0 h-40 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.42)_0%,rgba(255,255,255,0)_72%)]"
+                                />
+
+                                <div className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
+                                    <motion.div
+                                        initial={{ opacity: 0, x: -18 }}
+                                        animate={{ opacity: 1, x: 0 }}
+                                        transition={{ duration: 0.44, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
+                                        className="rounded-[32px] border border-[#d1cdc4] bg-[#f4f2eb] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.94),0_20px_34px_-26px_rgba(32,28,25,0.42)]"
+                                    >
+                                        <div className="flex items-center gap-4">
+                                            <div className="relative h-24 w-24 shrink-0 overflow-hidden rounded-[24px] border border-[#d4d0c8] bg-[#d9d5cd]">
+                                                {pendingUpload?.kind === "image" ? (
+                                                    <img
+                                                        src={pendingUpload.previewUrl}
+                                                        alt={pendingUpload.file.name}
+                                                        className="h-full w-full object-cover"
+                                                    />
+                                                ) : pendingUpload?.kind === "video" ? (
+                                                    <video
+                                                        src={pendingUpload.previewUrl}
+                                                        muted
+                                                        playsInline
+                                                        preload="metadata"
+                                                        className="h-full w-full object-cover"
+                                                    />
+                                                ) : (
+                                                    <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_top,rgba(36,33,43,0.18)_0%,rgba(36,33,43,0)_70%)] text-[#2b2831]">
+                                                        {pendingUpload?.kind === "audio" ? (
+                                                            <Music2 className="h-7 w-7" />
+                                                        ) : pendingUpload?.kind === "file" ? (
+                                                            <FileText className="h-7 w-7" />
+                                                        ) : (
+                                                            <Video className="h-7 w-7" />
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="min-w-0 space-y-1">
+                                                <div className="text-[11px] uppercase tracking-[0.18em] text-[#79736a]">
+                                                    Active Source
+                                                </div>
+                                                <div className="truncate text-[24px] font-medium leading-none text-[#1e1c22]">
+                                                    {sourceDisplayName}
+                                                </div>
+                                                <div className="text-sm text-[#706b63]">{sourceDetail}</div>
+                                                <div className="pt-1 text-xs text-[#8b857d]">
+                                                    Live shell feed staged for the central preview board.
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </motion.div>
+
+                                    <div className="space-y-5">
+                                        <motion.div
+                                            initial={{ opacity: 0, y: 14 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            transition={{ duration: 0.44, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
+                                            className="flex flex-wrap items-start justify-between gap-4"
+                                        >
+                                            <div className="grid flex-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                                                {uploadStudioVitals.map((stat) => (
+                                                    <div key={stat.label} className="min-w-0">
+                                                        <div className="text-[10px] uppercase tracking-[0.18em] text-[#7e776f]">
+                                                            {stat.label}
+                                                        </div>
+                                                        <div className="mt-1 truncate text-[30px] leading-none text-[#1f1c24]">
+                                                            {stat.value}
+                                                        </div>
+                                                        <div className="mt-1 text-xs text-[#6f6a62]">{stat.meta}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            <div className="flex flex-wrap gap-2 xl:justify-end">
+                                                {uploadStudioTabs.map(({ label, icon: Icon }) => (
+                                                    <span
+                                                        key={label}
+                                                        className="inline-flex items-center gap-2 rounded-full border border-[#d0cbc0] bg-[#f7f4ec] px-4 py-2 text-[11px] font-medium text-[#2f302b] shadow-[inset_0_1px_0_rgba(255,255,255,0.96)]"
+                                                    >
+                                                        <Icon className="h-3.5 w-3.5 text-[#666158]" />
+                                                        {label}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        </motion.div>
+
+                                        <motion.div
+                                            initial={{ opacity: 0, y: 16 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            transition={{ duration: 0.44, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                                            className="flex flex-wrap items-center gap-3"
+                                        >
+                                            <div className="inline-flex rounded-full border border-[#c7c3bb] bg-[#f4f2eb] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.84)]">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setAddSourceMode("upload")}
+                                                    className={cn(
+                                                        "inline-flex cursor-pointer items-center gap-2 rounded-full px-4 py-2 text-sm transition-all duration-300",
+                                                        addSourceMode === "upload"
+                                                            ? "bg-[#26232c] text-[#f2f1ec] shadow-[0_12px_26px_-20px_rgba(0,0,0,0.95)]"
+                                                            : "text-[#4c4850] hover:text-[#232029]"
+                                                    )}
+                                                >
+                                                    <Upload className="h-4 w-4" />
+                                                    Upload
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setAddSourceMode("link")}
+                                                    className={cn(
+                                                        "inline-flex cursor-pointer items-center gap-2 rounded-full px-4 py-2 text-sm transition-all duration-300",
+                                                        addSourceMode === "link"
+                                                            ? "bg-[#26232c] text-[#f2f1ec] shadow-[0_12px_26px_-20px_rgba(0,0,0,0.95)]"
+                                                            : "text-[#4c4850] hover:text-[#232029]"
+                                                    )}
+                                                >
+                                                    <LinkIcon className="h-4 w-4" />
+                                                    Link
+                                                </button>
+                                            </div>
+
+                                            <span className="rounded-full border border-[#d9db59] bg-[#ecff49] px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#1d1d1d] shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
+                                                {sourceReady ? "Preview Armed" : "Awaiting Clip"}
+                                            </span>
+                                            <span className="rounded-full border border-[#cbc7be] bg-white/60 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-[#58534c]">
+                                                Neo dashboard shell
+                                            </span>
+                                        </motion.div>
+                                    </div>
+                                </div>
+
+                                <div className="relative mt-8 min-h-[560px] overflow-hidden rounded-[38px] border border-[#c5c1b8] bg-[linear-gradient(180deg,#e9e6df_0%,#dfdbd2_100%)] px-3 pb-24 pt-10 shadow-[inset_0_1px_0_rgba(255,255,255,0.92),0_30px_60px_-42px_rgba(33,30,27,0.55)] sm:px-5 sm:pb-28 sm:pt-12">
+                                    <svg
+                                        aria-hidden
+                                        viewBox="0 0 1120 620"
+                                        preserveAspectRatio="none"
+                                        className="pointer-events-none absolute inset-0 h-full w-full"
+                                    >
+                                        <defs>
+                                            <linearGradient id="studioRail" x1="0%" x2="100%" y1="0%" y2="0%">
+                                                <stop offset="0%" stopColor="#ea9087" stopOpacity="0.95" />
+                                                <stop offset="50%" stopColor="#d8cf6e" stopOpacity="0.7" />
+                                                <stop offset="100%" stopColor="#90b78c" stopOpacity="0.95" />
+                                            </linearGradient>
+                                        </defs>
+                                        <path d="M0 178 H1120" stroke="url(#studioRail)" strokeWidth="2.2" />
+                                        <path d="M110 178 V575" stroke="#c2beb5" strokeWidth="1.3" />
+                                        <path d="M610 178 V575" stroke="#c2beb5" strokeWidth="1.3" />
+                                        <path d="M257 238 C257 238 294 238 302 278 V448 C302 490 342 490 360 490" stroke="#6e6864" strokeWidth="1.6" fill="none" />
+                                        <path d="M718 238 C718 238 756 238 764 278 V448 C764 490 722 490 706 490" stroke="#6e6864" strokeWidth="1.6" fill="none" />
+                                        <path d="M430 322 C374 322 356 300 356 276" stroke="#8a847e" strokeWidth="1.4" fill="none" />
+                                        <path d="M690 322 C746 322 764 300 764 276" stroke="#8a847e" strokeWidth="1.4" fill="none" />
+                                        <path d="M0 580 H1120" stroke="#d2cec5" strokeWidth="1.2" />
+                                    </svg>
+
+                                    <div className="absolute inset-x-[9%] top-[110px] hidden items-start justify-between lg:flex">
+                                        {uploadStudioStages.slice(0, 2).map(({ label, icon: Icon }, index) => (
+                                            <div key={label} className={cn("relative flex flex-col items-center", index === 1 && "translate-x-10")}>
+                                                <div className="grid h-12 w-12 place-items-center rounded-full border border-[#cfd35e] bg-[#ecff49] text-[#1d1d1d] shadow-[0_10px_24px_-16px_rgba(0,0,0,0.78)]">
+                                                    <Icon className="h-4 w-4" />
+                                                </div>
+                                                <div className="mt-4 text-center">
+                                                    <div className="text-[30px] leading-none text-[#25222a]">
+                                                        {index === 0 ? "Aug" : "Sep"}
+                                                    </div>
+                                                    <div className="mt-1 text-xs uppercase tracking-[0.18em] text-[#767068]">
+                                                        {label}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                        <div className="translate-x-4 text-right">
+                                            <div className="mb-4 text-xs uppercase tracking-[0.18em] text-[#767068]">
+                                                {uploadStudioStages[2]?.label}
+                                            </div>
+                                            <Button
+                                                type="button"
+                                                onClick={addSourceMode === "link" ? importSourceLink : applyUploadToPrompt}
+                                                disabled={!sourceReady}
+                                                className="h-14 w-14 rounded-full border border-[#3d3942] bg-[#2a2730] p-0 text-white hover:bg-[#34313b] disabled:border-[#76716b] disabled:bg-[#a7a29a]"
+                                            >
+                                                <PlusIcon className="h-5 w-5" />
+                                            </Button>
+                                        </div>
+                                    </div>
+
+                                    <AnimatePresence mode="wait">
+                                        {addSourceMode === "link" ? (
+                                            <motion.div
+                                                key="link-source"
+                                                initial={{ opacity: 0, y: 14, filter: "blur(8px)" }}
+                                                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                                                exit={{ opacity: 0, y: -12, filter: "blur(8px)" }}
+                                                transition={{ duration: 0.24, ease: "easeOut" }}
+                                                className="relative z-10 grid gap-5 pt-24 lg:grid-cols-[220px_minmax(0,1fr)_220px]"
+                                            >
+                                                <motion.aside
+                                                    initial={{ opacity: 0, x: -18 }}
+                                                    animate={{ opacity: 1, x: 0 }}
+                                                    transition={{ duration: 0.36, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
+                                                    className="rounded-[30px] border border-[#d1cdc4] bg-[#faf8f2] p-4 shadow-[0_28px_50px_-38px_rgba(0,0,0,0.55)] lg:mt-10"
+                                                >
+                                                    <div className="text-[11px] uppercase tracking-[0.18em] text-[#79736a]">
+                                                        Source Dock
+                                                    </div>
+                                                    <div className="mt-3 rounded-[24px] border border-dashed border-[#b9b4ab] bg-[#f5f2ea] p-4">
+                                                        <div className="rounded-full border border-[#d5d0c6] bg-white px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-[#6f6961]">
+                                                            URL Source
+                                                        </div>
+                                                        <Input
+                                                            value={sourceUrl}
+                                                            onChange={(e) => setSourceUrl(e.target.value)}
+                                                            onKeyDown={(event) => {
+                                                                if (event.key === "Enter" && sourceUrlValue) {
+                                                                    event.preventDefault();
+                                                                    importSourceLink();
+                                                                }
+                                                            }}
+                                                            placeholder="Paste a source link"
+                                                            className="mt-4 h-12 rounded-[20px] border-[#c7c2b8] bg-white text-[#25222a] placeholder:text-[#7a756d]"
+                                                        />
+                                                        <p className="mt-3 text-sm leading-6 text-[#6d675f]">
+                                                            Drop in a live reference URL and attach it from the right-side command node.
+                                                        </p>
+                                                    </div>
+                                                </motion.aside>
+
+                                                <motion.article
+                                                    initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                                                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                                                    transition={{ duration: 0.42, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
+                                                    className="rounded-[34px] border border-[#d1cdc4] bg-[#fbfaf6] p-4 shadow-[0_36px_80px_-52px_rgba(0,0,0,0.7)] lg:mt-4"
+                                                >
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <span className="rounded-full border border-[#d1cdc4] bg-white px-3 py-1.5 text-[11px] font-medium text-[#2a2630]">
+                                                                URL
+                                                            </span>
+                                                            <span className="rounded-full border border-[#d1cdc4] bg-white px-3 py-1.5 text-[11px] font-medium text-[#2a2630]">
+                                                                Central Preview
+                                                            </span>
+                                                        </div>
+                                                        <span className="rounded-full border border-[#d5d95a] bg-[#ecff49] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-[#202020]">
+                                                            {sourceReady ? "Link armed" : "Standby"}
+                                                        </span>
+                                                    </div>
+
+                                                    <div className="mt-4 overflow-hidden rounded-[30px] border border-[#3f3a42]/14 bg-[radial-gradient(circle_at_top,rgba(236,255,73,0.14)_0%,rgba(236,255,73,0)_34%),linear-gradient(180deg,#26222c_0%,#191720_100%)]">
+                                                        <div className="flex min-h-[360px] flex-col items-center justify-center px-8 py-12 text-center text-[#f5f2eb] sm:min-h-[430px]">
+                                                            <div className="rounded-full border border-white/14 bg-white/[0.06] p-4 shadow-[0_0_0_16px_rgba(236,255,73,0.08)]">
+                                                                <LinkIcon className="h-8 w-8" />
+                                                            </div>
+                                                            <div className="mt-6 text-[28px] leading-tight">
+                                                                Remote source will resolve into this central board
+                                                            </div>
+                                                            <div className="mt-3 max-w-md text-sm leading-6 text-white/62">
+                                                                The preview lane stays device-like and cinematic while the link payload is staged.
+                                                            </div>
+                                                            {sourceUrlValue && (
+                                                                <div className="mt-6 max-w-lg rounded-full border border-white/10 bg-white/[0.06] px-4 py-2 text-xs text-white/74">
+                                                                    {sourceUrlValue}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </motion.article>
+
+                                                <motion.aside
+                                                    initial={{ opacity: 0, x: 18 }}
+                                                    animate={{ opacity: 1, x: 0 }}
+                                                    transition={{ duration: 0.36, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
+                                                    className="grid gap-4 lg:mt-16"
+                                                >
+                                                    <div className="rounded-[28px] border border-[#d1cdc4] bg-[#fbfaf6] p-4 shadow-[0_26px_48px_-40px_rgba(0,0,0,0.55)]">
+                                                        <div className="flex items-center justify-between gap-3">
+                                                            <div className="text-sm font-semibold text-[#2d2932]">Preview Status</div>
+                                                            <span className="rounded-full border border-[#d5d95a] bg-[#ecff49] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#1f1f1f]">
+                                                                {sourceReady ? "Ready" : "Idle"}
+                                                            </span>
+                                                        </div>
+                                                        <div className="mt-4 space-y-2 text-sm text-[#4e4a53]">
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <span>Surface</span>
+                                                                <span className="font-medium text-[#25212a]">Central board</span>
+                                                            </div>
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <span>Feed</span>
+                                                                <span className="truncate font-medium text-[#25212a]">Remote URL</span>
+                                                            </div>
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <span>Shell</span>
+                                                                <span className="font-medium text-[#25212a]">Phonk frame</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="rounded-[28px] border border-[#d1cdc4] bg-[#f4f2eb] p-4 shadow-[0_26px_48px_-40px_rgba(0,0,0,0.45)]">
+                                                        <div className="text-[11px] uppercase tracking-[0.18em] text-[#77726a]">
+                                                            Attach Lane
+                                                        </div>
+                                                        <div className="mt-3 text-sm leading-6 text-[#5a554e]">
+                                                            Use the dark plus command on the rail to attach this link directly into the prompt.
+                                                        </div>
+                                                    </div>
+                                                </motion.aside>
+                                            </motion.div>
+                                        ) : (
+                                            <motion.div
+                                                key="upload-source"
+                                                initial={{ opacity: 0, y: 14, filter: "blur(8px)" }}
+                                                animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                                                exit={{ opacity: 0, y: -12, filter: "blur(8px)" }}
+                                                transition={{ duration: 0.24, ease: "easeOut" }}
+                                                className="relative z-10 grid gap-5 pt-24 lg:grid-cols-[220px_minmax(0,1fr)_220px]"
+                                            >
+                                                <motion.aside
+                                                    initial={{ opacity: 0, x: -18 }}
+                                                    animate={{ opacity: 1, x: 0 }}
+                                                    transition={{ duration: 0.36, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
+                                                    className="space-y-4 lg:mt-10"
+                                                >
+                                                    <div className="rounded-[30px] border border-[#d1cdc4] bg-[#faf8f2] p-4 shadow-[0_28px_50px_-38px_rgba(0,0,0,0.55)]">
+                                                        <input
+                                                            ref={sourceFileInputRef}
+                                                            type="file"
+                                                            className="hidden"
+                                                            onChange={handleSourceFileInputChange}
+                                                        />
+
+                                                        <div className="text-[11px] uppercase tracking-[0.18em] text-[#79736a]">
+                                                            Source Dock
+                                                        </div>
+                                                        <div
+                                                            onDragOver={(event) => {
+                                                                event.preventDefault();
+                                                                setIsSourceDragOver(true);
+                                                            }}
+                                                            onDragLeave={() => setIsSourceDragOver(false)}
+                                                            onDrop={handleSourceDrop}
+                                                            className={cn(
+                                                                "mt-3 flex min-h-[220px] flex-col items-center justify-center rounded-[26px] border border-dashed px-4 py-8 text-center transition-all duration-300",
+                                                                isSourceDragOver
+                                                                    ? "border-[#35313b]/60 bg-[#f2efe7]"
+                                                                    : "border-[#b7b2aa] bg-[#f7f4ed]"
+                                                            )}
+                                                        >
+                                                            <div className="mb-3 rounded-full border border-[#d2cdc4] bg-white p-3 text-[#26232c] shadow-[0_14px_28px_-22px_rgba(0,0,0,0.42)]">
+                                                                <Upload className="h-4 w-4" />
+                                                            </div>
+                                                            <p className="text-base font-medium text-[#2f2b34]">Drop video</p>
+                                                            <p className="mt-1 text-xs text-[#6f6a62]">MP4, MOV, WEBM supported</p>
+                                                            <Button
+                                                                type="button"
+                                                                variant="outline"
+                                                                className="mt-5 rounded-full border-[#8f8b95] bg-[#24212b] text-[#f2f1eb] hover:bg-[#35313c] hover:text-[#f2f1eb]"
+                                                                onClick={() => sourceFileInputRef.current?.click()}
+                                                            >
+                                                                Choose File
+                                                            </Button>
+                                                        </div>
+                                                    </div>
+
+                                                    {pendingUpload && (
+                                                        <motion.div
+                                                            initial={{ opacity: 0, y: 8 }}
+                                                            animate={{ opacity: 1, y: 0 }}
+                                                            transition={{ duration: 0.24, ease: "easeOut" }}
+                                                            className="rounded-[26px] border border-[#d1cdc4] bg-[#fbfaf6] p-4 shadow-[0_24px_44px_-38px_rgba(0,0,0,0.48)]"
+                                                        >
+                                                            <div className="flex items-center gap-3">
+                                                                <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-[18px] border border-[#d0cbc1] bg-[#1f1c25]">
+                                                                    {pendingUpload.kind === "image" ? (
+                                                                        <img
+                                                                            src={pendingUpload.previewUrl}
+                                                                            alt={pendingUpload.file.name}
+                                                                            className="h-full w-full object-cover"
+                                                                        />
+                                                                    ) : pendingUpload.kind === "video" ? (
+                                                                        <video
+                                                                            src={pendingUpload.previewUrl}
+                                                                            muted
+                                                                            playsInline
+                                                                            preload="metadata"
+                                                                            className="h-full w-full object-cover"
+                                                                        />
+                                                                    ) : (
+                                                                        <div className="flex h-full w-full items-center justify-center text-[#f4f3ee]">
+                                                                            {pendingUpload.kind === "audio" ? (
+                                                                                <Music2 className="h-4 w-4" />
+                                                                            ) : (
+                                                                                <FileText className="h-4 w-4" />
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+
+                                                                <div className="min-w-0 flex-1">
+                                                                    <p className="truncate text-sm font-semibold text-[#2d2a33]">
+                                                                        {pendingUpload.file.name}
+                                                                    </p>
+                                                                    <p className="text-xs text-[#69666e]">
+                                                                        {formatFileSize(pendingUpload.file.size)}
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+
+                                                            <Button
+                                                                type="button"
+                                                                variant="outline"
+                                                                className="mt-4 rounded-full border-[#b0aba2] bg-transparent text-[#3c3941] hover:bg-[#eceae5]"
+                                                                onClick={clearPendingUpload}
+                                                            >
+                                                                Remove
+                                                            </Button>
+                                                        </motion.div>
+                                                    )}
+                                                </motion.aside>
+
+                                                <motion.article
+                                                    initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                                                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                                                    transition={{ duration: 0.42, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
+                                                    className="rounded-[34px] border border-[#d1cdc4] bg-[#fbfaf6] p-4 shadow-[0_36px_80px_-52px_rgba(0,0,0,0.7)] lg:mt-4"
+                                                >
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <span className="rounded-full border border-[#d1cdc4] bg-white px-3 py-1.5 text-[11px] font-medium text-[#2a2630]">
+                                                                {sourcePrimaryBadge}
+                                                            </span>
+                                                            <span className="rounded-full border border-[#d1cdc4] bg-white px-3 py-1.5 text-[11px] font-medium text-[#2a2630]">
+                                                                Showcase
+                                                            </span>
+                                                        </div>
+                                                        <span className="rounded-full border border-[#d5d95a] bg-[#ecff49] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-[#202020]">
+                                                            {sourceReady ? "Showcase live" : "Awaiting source"}
+                                                        </span>
+                                                    </div>
+                                                    <div className="mt-4 overflow-hidden rounded-[30px] border border-[#3f3a42]/14 bg-[radial-gradient(circle_at_top,rgba(236,255,73,0.14)_0%,rgba(236,255,73,0)_30%),linear-gradient(180deg,#26222c_0%,#191720_100%)]">
+                                                        {pendingUpload?.kind === "video" ? (
+                                                            <video
+                                                                src={pendingUpload.previewUrl}
+                                                                autoPlay
+                                                                muted
+                                                                loop
+                                                                playsInline
+                                                                preload="metadata"
+                                                                className="min-h-[360px] w-full object-cover sm:min-h-[430px]"
+                                                            />
+                                                        ) : pendingUpload?.kind === "image" ? (
+                                                            <img
+                                                                src={pendingUpload.previewUrl}
+                                                                alt={pendingUpload.file.name}
+                                                                className="min-h-[360px] w-full object-cover sm:min-h-[430px]"
+                                                            />
+                                                        ) : pendingUpload?.kind ? (
+                                                            <div className="flex min-h-[360px] flex-col items-center justify-center px-8 py-12 text-center text-[#f4f2eb] sm:min-h-[430px]">
+                                                                <div className="rounded-full border border-white/15 bg-white/[0.06] p-4">
+                                                                    {pendingUpload.kind === "audio" ? (
+                                                                        <Music2 className="h-7 w-7" />
+                                                                    ) : (
+                                                                        <FileText className="h-7 w-7" />
+                                                                    )}
+                                                                </div>
+                                                                <div className="mt-5 text-lg font-medium">{pendingUpload.file.name}</div>
+                                                                <div className="mt-2 max-w-sm text-sm text-white/60">
+                                                                    This source is staged and ready even though it does not have a visual preview.
+                                                                </div>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="flex min-h-[360px] flex-col items-center justify-center px-8 py-12 text-center text-[#f4f2eb] sm:min-h-[430px]">
+                                                                <div className="rounded-full border border-white/15 bg-white/[0.06] p-4 shadow-[0_0_0_16px_rgba(233,255,73,0.08)]">
+                                                                    <MonitorIcon className="h-8 w-8" />
+                                                                </div>
+                                                                <div className="mt-5 text-[28px] leading-tight">
+                                                                    Your uploaded clip will render into the central board
+                                                                </div>
+                                                                <div className="mt-2 max-w-md text-sm leading-6 text-white/60">
+                                                                    The layout now follows the reference: a single instrument panel with the source dock, rail, and bottom control strip.
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </motion.article>
+
+                                                <motion.aside
+                                                    initial={{ opacity: 0, x: 18 }}
+                                                    animate={{ opacity: 1, x: 0 }}
+                                                    transition={{ duration: 0.36, delay: 0.14, ease: [0.22, 1, 0.36, 1] }}
+                                                    className="grid gap-4 lg:mt-16"
+                                                >
+                                                    <div className="rounded-[28px] border border-[#d1cdc4] bg-[#fbfaf6] p-4 shadow-[0_26px_48px_-40px_rgba(0,0,0,0.55)]">
+                                                        <div className="flex items-center justify-between gap-3">
+                                                            <div className="text-sm font-semibold text-[#2d2932]">Preview Status</div>
+                                                            <span className="rounded-full border border-[#d5d95a] bg-[#ecff49] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#1f1f1f]">
+                                                                {sourceReady ? "Ready" : "Idle"}
+                                                            </span>
+                                                        </div>
+                                                        <div className="mt-4 space-y-2 text-sm text-[#4e4a53]">
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <span>Surface</span>
+                                                                <span className="font-medium text-[#25212a]">Central showcase</span>
+                                                            </div>
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <span>Source</span>
+                                                                <span className="truncate font-medium text-[#25212a]">{sourcePrimaryBadge}</span>
+                                                            </div>
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <span>Shell</span>
+                                                                <span className="font-medium text-[#25212a]">Phonk frame</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="rounded-[28px] border border-[#d1cdc4] bg-[#f4f2eb] p-4 shadow-[0_26px_48px_-40px_rgba(0,0,0,0.45)]">
+                                                        <div className="text-[11px] uppercase tracking-[0.18em] text-[#77726a]">
+                                                            Attach Lane
+                                                        </div>
+                                                        <div className="mt-3 text-sm leading-6 text-[#5a554e]">
+                                                            Use the dark plus command on the rail to push this staged clip into the prompt with the streamlined dashboard flow.
+                                                        </div>
+                                                    </div>
+                                                </motion.aside>
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                    <div className="absolute inset-x-3 bottom-3 flex items-center gap-3 rounded-[26px] border border-[#d2cec5] bg-white/70 px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.82)] backdrop-blur-md sm:inset-x-4 sm:bottom-4 sm:px-4">
+                                        <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#cbc6bc] bg-[#26232c] text-[#f5f2ea]">
+                                            <PanelsTopLeft className="h-4 w-4" />
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="text-[10px] uppercase tracking-[0.18em] text-[#7b756d]">Studio rail</div>
+                                            <div className="truncate text-sm text-[#2d2932]">
+                                                Source dock, central preview, and attach command aligned on one board.
+                                            </div>
+                                        </div>
+                                        <Button
+                                            type="button"
+                                            onClick={addSourceMode === "link" ? importSourceLink : applyUploadToPrompt}
+                                            disabled={!sourceReady}
+                                            className="h-10 rounded-full bg-[#26232c] px-4 text-[#f5f2ea] hover:bg-[#34313b] lg:hidden"
+                                        >
+                                            <PlusIcon className="mr-2 h-4 w-4" />
+                                            Attach
+                                        </Button>
+                                        <div className="rounded-[20px] border border-[#34303a] bg-[#26232c] p-1.5 shadow-[0_20px_34px_-24px_rgba(0,0,0,0.9)]">
+                                            <div className="flex items-center gap-1.5">
+                                                {uploadStudioUtilities.map(({ label, icon: Icon }) => (
+                                                    <span
+                                                        key={label}
+                                                        className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-3 py-2 text-[11px] text-white/74"
+                                                    >
+                                                        <Icon className="h-3.5 w-3.5" />
+                                                        <span className="hidden sm:inline">{label}</span>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </motion.div>
+                        </div>
+                    </div>
+                    )}
+                </DialogContent>
+            </Dialog>
+
+            {/* TEMPLATES + STYLES */}
+            <Sheet open={templatesOpen} onOpenChange={setTemplatesOpen}>
+                <SheetContent side="right" className="p-0 flex flex-col overflow-hidden">
+                    <SheetHeader className="px-6 pt-6">
+                        <SheetTitle>Templates and Styles</SheetTitle>
+                        <SheetDescription>
+                            Select one active style. Saved in localStorage.
+                        </SheetDescription>
+                        {process.env.NODE_ENV === "development" && (
+                            <div className="mt-1 text-[11px] leading-tight text-white/45">
+                                {isLoadingAirtableStylePreviews
+                                    ? "Loading Airtable previews on demand..."
+                                    : hasLoadedAirtableStylePreviews
+                                        ? `Airtable previews loaded: ${Object.keys(airtableStylePreviews).length} styles`
+                                        : "Airtable previews stay dormant until this panel is opened."}
+                                {hasLoadedAirtableStylePreviews && Object.keys(airtableStylePreviews).length === 0 && (
+                                    <span className="ml-2 text-white/35">
+                                        No Airtable previews matched. Using local fallback previews.
+                                    </span>
+                                )}
+                            </div>
+                        )}
+                    </SheetHeader>
+                    <div className="flex-1 overflow-y-auto overscroll-contain px-6 pb-6 pt-4 space-y-4">
+                        <div className="grid gap-3">
+                            {STYLE_TEMPLATES.map((template) => {
+                                const selected = template.id === activeStyleId;
+
+                                const norm = (s: string) =>
+                                    s
+                                        .toLowerCase()
+                                        .trim()
+                                        .replace(/[^a-z0-9]+/g, "-")
+                                        .replace(/(^-|-$)/g, "");
+
+                                const candidates = [
+                                    template.id,
+                                    template.name,
+                                    template.id.replace(/^style_/, ""),
+                                ].map(norm);
+
+                                const matchedKey = candidates.find((k) => !!airtableStylePreviews[k]);
+
+                                const previewImages = matchedKey
+                                    ? airtableStylePreviews[matchedKey]
+                                    : template.previewImages;
+                                const hasPreviews = previewImages.length > 0;
+                                const source =
+                                    matchedKey && airtableStylePreviews[matchedKey]?.length > 0
+                                        ? "airtable"
+                                        : "fallback";
+                                return (
+                                    <button
+                                        key={template.id}
+                                        onClick={() => {
+                                            setActiveStyleId(template.id);
+                                            persistActiveStyleId(template.id);
+                                            setTemplatesOpen(false);
+                                        }}
+                                        className={cn(
+                                            "w-full text-left rounded-xl border p-4 transition-colors transition-shadow",
+                                            selected
+                                                ? "border-purple-400/30 bg-purple-500/10 shadow-[0_0_0_1px_rgba(168,85,247,0.16)]"
+                                                : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05] hover:border-purple-400/30 hover:shadow-[0_0_0_1px_rgba(168,85,247,0.12)]"
+                                        )}
+                                    >
+                                        <div className="flex gap-3">
+                                            <div className="hidden sm:grid grid-cols-3 gap-2">
+                                                {hasPreviews ? (
+                                                    previewImages.slice(0, 3).map((src) => (
+                                                        <div
+                                                            key={src}
+                                                            className="relative h-16 w-24 overflow-hidden rounded-lg border border-white/10"
+                                                        >
+                                                            {failedImages[src] ? (
+                                                                <div className="flex h-full w-full items-center justify-center bg-white/[0.03] text-white/40">
+                                                                    <ImageIcon className="h-4 w-4" />
+                                                                </div>
+                                                            ) : (
+                                                                <Image
+                                                                    src={src}
+                                                                    alt=""
+                                                                    fill
+                                                                    className="object-cover"
+                                                                    sizes="96px"
+                                                                    unoptimized
+                                                                    onError={() =>
+                                                                        setFailedImages((m) => ({ ...m, [src]: true }))
+                                                                    }
+                                                                />
+                                                            )}
+                                                        </div>
+                                                    ))
+                                                ) : (
+                                                    <div className="flex h-16 w-24 items-center justify-center overflow-hidden rounded-lg border border-white/10 bg-white/[0.03] text-white/40">
+                                                        <ImageIcon className="h-4 w-4" />
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="sm:hidden relative h-24 w-full overflow-hidden rounded-lg border border-white/10">
+                                                {hasPreviews ? (
+                                                    failedImages[previewImages[0]] ? (
+                                                        <div className="flex h-full w-full items-center justify-center bg-white/[0.03] text-white/40">
+                                                            <ImageIcon className="h-5 w-5" />
+                                                        </div>
+                                                    ) : (
+                                                        <Image
+                                                            src={previewImages[0]}
+                                                            alt=""
+                                                            fill
+                                                            className="object-cover"
+                                                            sizes="100vw"
+                                                            unoptimized
+                                                            onError={() =>
+                                                                setFailedImages((m) => ({
+                                                                    ...m,
+                                                                    [previewImages[0]]: true,
+                                                                }))
+                                                            }
+                                                        />
+                                                    )
+                                                ) : (
+                                                    <div className="flex h-full w-full items-center justify-center bg-white/[0.03] text-white/40">
+                                                        <ImageIcon className="h-5 w-5" />
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="flex-1">
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <div className="text-sm font-semibold text-white/90">{template.name}</div>
+                                                    <div className="flex items-center gap-2">
+                                                        {process.env.NODE_ENV === "development" && (
+                                                            <Badge
+                                                                variant="secondary"
+                                                                className="text-[10px] px-2 py-0.5"
+                                                            >
+                                                                {source === "airtable" ? "Airtable" : "Local"}
+                                                            </Badge>
+                                                        )}
+                                                        {selected ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Style</Badge>}
+                                                    </div>
+                                                </div>
+                                                <div className="mt-1 text-xs text-white/45">{template.description}</div>
+                                                <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                                                    {template.tags.map((tag) => (
+                                                        <Badge key={tag} variant="secondary">{tag}</Badge>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </SheetContent>
+            </Sheet>
+
+            <AnimatePresence>
+                {editorLaunchOverlay ? (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.18, ease: "easeOut" }}
+                        className="fixed inset-0 z-[90] flex items-center justify-center bg-[rgba(3,3,8,0.68)] px-4 backdrop-blur-xl"
+                    >
+                        <div
+                            aria-hidden
+                            className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_28%,rgba(142,104,255,0.24)_0%,rgba(142,104,255,0.08)_22%,rgba(3,3,8,0)_58%),radial-gradient(circle_at_20%_80%,rgba(38,125,255,0.16)_0%,rgba(38,125,255,0)_28%)]"
+                        />
+                        <motion.div
+                            initial={{ opacity: 0, y: 16, scale: 0.98 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: 8, scale: 0.99 }}
+                            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                            className="relative w-full max-w-[620px]"
+                        >
+                            <div
+                                aria-hidden
+                                className="pointer-events-none absolute inset-x-[12%] top-1/2 h-40 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgba(255,255,255,0.12)_0%,rgba(145,110,255,0.12)_34%,rgba(3,3,8,0)_74%)] blur-[58px]"
+                            />
+                            <InfinityTrailLoader
+                                variant="stacked"
+                                label={`Opening ${editorLaunchOverlay.title}`}
+                                subtitle={editorLaunchOverlay.detail}
+                                className="w-full"
+                            />
+                        </motion.div>
+                    </motion.div>
+                ) : null}
+            </AnimatePresence>
+
+        </div>
+    );
+}
+
+function TypingDots() {
+    return (
+        <div className="flex items-center ml-1">
+            {[1, 2, 3].map((dot) => (
+                <motion.div
+                    key={dot}
+                    className="w-1.5 h-1.5 bg-white/90 rounded-full mx-0.5"
+                    initial={{ opacity: 0.3 }}
+                    animate={{ 
+                        opacity: [0.3, 0.9, 0.3],
+                        scale: [0.85, 1.1, 0.85]
+                    }}
+                    transition={{
+                        duration: 1.2,
+                        repeat: Infinity,
+                        delay: dot * 0.15,
+                        ease: "easeInOut",
+                    }}
+                    style={{
+                        boxShadow: "0 0 4px rgba(255, 255, 255, 0.3)"
+                    }}
+                />
+            ))}
+        </div>
+    );
+}
+
+interface ActionButtonProps {
+    icon: React.ReactNode;
+    label: string;
+}
+
+function ActionButton({ icon, label }: ActionButtonProps) {
+    const [isHovered, setIsHovered] = React.useState(false);
+    
+    return (
+        <motion.button
+            type="button"
+            whileHover={{ scale: 1.05, y: -2 }}
+            whileTap={{ scale: 0.97 }}
+            onMouseEnter={() => setIsHovered(true)}
+            onMouseLeave={() => setIsHovered(false)}
+            className="flex items-center gap-2 px-4 py-2 bg-neutral-900 hover:bg-neutral-800 rounded-full border border-neutral-800 text-neutral-400 hover:text-white transition-all relative overflow-hidden group"
+        >
+            <div className="relative z-10 flex items-center gap-2">
+                {icon}
+                <span className="text-xs relative z-10">{label}</span>
+            </div>
+            
+            <AnimatePresence>
+                {isHovered && (
+                    <motion.div 
+                        className="absolute inset-0 bg-gradient-to-r from-violet-500/10 to-indigo-500/10"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                    />
+                )}
+            </AnimatePresence>
+            
+            <motion.span 
+                className="absolute bottom-0 left-0 w-full h-0.5 bg-gradient-to-r from-violet-500 to-indigo-500"
+                initial={{ width: 0 }}
+                whileHover={{ width: "100%" }}
+                transition={{ duration: 0.3 }}
+            />
+        </motion.button>
+    );
+}
+
+const rippleKeyframes = `
+@keyframes ripple {
+  0% { transform: scale(0.5); opacity: 0.6; }
+  100% { transform: scale(2); opacity: 0; }
+}
+`;
+
+if (typeof document !== 'undefined') {
+    const style = document.createElement('style');
+    style.innerHTML = rippleKeyframes;
+    document.head.appendChild(style);
+}

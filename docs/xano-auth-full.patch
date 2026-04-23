@@ -1,0 +1,460 @@
+﻿diff --git a/package.json b/package.json
+index 9ca0272..cf2a249 100644
+--- a/package.json
++++ b/package.json
+@@ -48,6 +48,7 @@
+     "framer-motion": "12.29.2",
+     "input-otp": "1.4.1",
+     "lucide-react": "^0.454.0",
++    "motion": "^12.31.0",
+     "next": "16.0.10",
+     "next-themes": "^0.4.6",
+     "react": "19.2.0",
+@@ -73,4 +74,4 @@
+     "tw-animate-css": "1.3.3",
+     "typescript": "^5"
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/lib/xano/config.ts b/lib/xano/config.ts
+new file mode 100644
+index 0000000..649561c
+--- /dev/null
++++ b/lib/xano/config.ts
+@@ -0,0 +1,12 @@
++export const XANO_BASE = 'https://x8ki-letl-twmt.n7.xano.io/api:zFS15jK8'
++
++export const ENDPOINTS = {
++  signupPath: '/auth/signup',
++  loginPath: '/auth/login',
++  mePath: '/auth/me',
++  verifyEmailPath: '/auth/verify',
++  resendVerificationPath: '/auth/resend-verification',
++  googleStartUrl: '<PASTE_XANO_GOOGLE_START_URL>',
++  googleExchangeUrl: '<PASTE_XANO_GOOGLE_EXCHANGE_URL>',
++} as const
++
+diff --git a/lib/xano/server.ts b/lib/xano/server.ts
+new file mode 100644
+index 0000000..5772859
+--- /dev/null
++++ b/lib/xano/server.ts
+@@ -0,0 +1,49 @@
++import 'server-only'
++
++import { XANO_BASE } from './config'
++
++type XanoFetchOptions = Omit<RequestInit, 'body' | 'headers'> & {
++  body?: unknown
++  headers?: Record<string, string>
++}
++
++export async function xanoFetch<T>(
++  pathOrUrl: string,
++  options: XanoFetchOptions = {},
++  token?: string
++): Promise<T> {
++  const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${XANO_BASE}${pathOrUrl}`
++
++  const headers: Record<string, string> = {
++    'Content-Type': 'application/json',
++    ...(options.headers ?? {}),
++  }
++
++  if (token) headers.Authorization = `Bearer ${token}`
++
++  const res = await fetch(url, {
++    ...options,
++    cache: 'no-store',
++    headers,
++    body: options.body === undefined ? undefined : JSON.stringify(options.body),
++  })
++
++  const text = await res.text()
++  const data = text ? safeJsonParse(text) : null
++
++  if (!res.ok) {
++    const msg = typeof data === 'object' && data && 'message' in data ? String((data as any).message) : text
++    throw new Error(`[XANO] ${res.status} ${res.statusText}: ${msg}`)
++  }
++
++  return data as T
++}
++
++function safeJsonParse(text: string) {
++  try {
++    return JSON.parse(text)
++  } catch {
++    return text
++  }
++}
++
+diff --git a/lib/auth/cookies.ts b/lib/auth/cookies.ts
+new file mode 100644
+index 0000000..0968f42
+--- /dev/null
++++ b/lib/auth/cookies.ts
+@@ -0,0 +1,31 @@
++import 'server-only'
++
++import { cookies } from 'next/headers'
++
++const COOKIE_NAME = 'xano_token'
++
++export async function getXanoToken(): Promise<string | undefined> {
++  const jar = await cookies()
++  return jar.get(COOKIE_NAME)?.value
++}
++
++export async function setXanoToken(token: string) {
++  const jar = await cookies()
++  jar.set(COOKIE_NAME, token, {
++    httpOnly: true,
++    sameSite: 'lax',
++    secure: process.env.NODE_ENV === 'production',
++    path: '/',
++  })
++}
++
++export async function clearXanoToken() {
++  const jar = await cookies()
++  jar.set(COOKIE_NAME, '', {
++    httpOnly: true,
++    sameSite: 'lax',
++    secure: process.env.NODE_ENV === 'production',
++    path: '/',
++    maxAge: 0,
++  })
++}
+diff --git a/app/api/auth/_utils.ts b/app/api/auth/_utils.ts
+new file mode 100644
+index 0000000..df2d271
+--- /dev/null
++++ b/app/api/auth/_utils.ts
+@@ -0,0 +1,19 @@
++import { ENDPOINTS } from '@/lib/xano/config'
++
++export function extractToken(payload: unknown): string | undefined {
++  if (!payload || typeof payload !== 'object') return undefined
++  const obj = payload as Record<string, unknown>
++  const candidates = ['token', 'authToken', 'auth_token', 'accessToken', 'access_token']
++  for (const key of candidates) {
++    const value = obj[key]
++    if (typeof value === 'string' && value.trim()) return value
++  }
++  return undefined
++}
++
++export function ensureEndpoint(pathOrUrl: string, name: keyof typeof ENDPOINTS) {
++  if (!pathOrUrl || pathOrUrl.includes('<PASTE_')) {
++    throw new Error(`[CONFIG] Missing Xano endpoint for ${String(name)} in lib/xano/config.ts`)
++  }
++}
++
+diff --git a/app/api/auth/signup/route.ts b/app/api/auth/signup/route.ts
+new file mode 100644
+index 0000000..4929fcc
+--- /dev/null
++++ b/app/api/auth/signup/route.ts
+@@ -0,0 +1,41 @@
++import { NextResponse } from 'next/server'
++
++import { setXanoToken } from '@/lib/auth/cookies'
++import { ENDPOINTS } from '@/lib/xano/config'
++import { xanoFetch } from '@/lib/xano/server'
++
++import { extractToken, ensureEndpoint } from '../_utils'
++
++type SignupBody = {
++  fullName: string
++  email: string
++  password: string
++}
++
++export async function POST(req: Request) {
++  try {
++    ensureEndpoint(ENDPOINTS.signupPath, 'signupPath')
++    const body = (await req.json()) as Partial<SignupBody>
++
++    const payload = {
++      fullName: body.fullName ?? '',
++      email: body.email ?? '',
++      password: body.password ?? '',
++    }
++
++    const res = await xanoFetch<any>(ENDPOINTS.signupPath, { method: 'POST', body: payload })
++    const token = extractToken(res)
++    if (token) await setXanoToken(token)
++
++    const user = res?.user ?? res?.data?.user ?? res?.data ?? res?.user_data ?? null
++    const verificationRequired =
++      Boolean(res?.verification_required) ||
++      Boolean(res?.verificationRequired) ||
++      res?.status === 'verification_required'
++
++    return NextResponse.json({ user, verificationRequired })
++  } catch (err) {
++    const message = err instanceof Error ? err.message : 'Signup failed'
++    return NextResponse.json({ error: message }, { status: 400 })
++  }
++}
+diff --git a/app/api/auth/login/route.ts b/app/api/auth/login/route.ts
+new file mode 100644
+index 0000000..6dc9ec0
+--- /dev/null
++++ b/app/api/auth/login/route.ts
+@@ -0,0 +1,34 @@
++import { NextResponse } from 'next/server'
++
++import { setXanoToken } from '@/lib/auth/cookies'
++import { ENDPOINTS } from '@/lib/xano/config'
++import { xanoFetch } from '@/lib/xano/server'
++
++import { extractToken, ensureEndpoint } from '../_utils'
++
++type LoginBody = {
++  email: string
++  password: string
++}
++
++export async function POST(req: Request) {
++  try {
++    ensureEndpoint(ENDPOINTS.loginPath, 'loginPath')
++    const body = (await req.json()) as Partial<LoginBody>
++
++    const payload = {
++      email: body.email ?? '',
++      password: body.password ?? '',
++    }
++
++    const res = await xanoFetch<any>(ENDPOINTS.loginPath, { method: 'POST', body: payload })
++    const token = extractToken(res)
++    if (token) await setXanoToken(token)
++
++    const user = res?.user ?? res?.data?.user ?? res?.data ?? null
++    return NextResponse.json({ user })
++  } catch (err) {
++    const message = err instanceof Error ? err.message : 'Login failed'
++    return NextResponse.json({ error: message }, { status: 401 })
++  }
++}
+diff --git a/app/api/auth/logout/route.ts b/app/api/auth/logout/route.ts
+new file mode 100644
+index 0000000..664a45d
+--- /dev/null
++++ b/app/api/auth/logout/route.ts
+@@ -0,0 +1,8 @@
++import { NextResponse } from 'next/server'
++
++import { clearXanoToken } from '@/lib/auth/cookies'
++
++export async function POST() {
++  await clearXanoToken()
++  return NextResponse.json({ ok: true })
++}
+diff --git a/app/api/auth/me/route.ts b/app/api/auth/me/route.ts
+new file mode 100644
+index 0000000..f430325
+--- /dev/null
++++ b/app/api/auth/me/route.ts
+@@ -0,0 +1,22 @@
++import { NextResponse } from 'next/server'
++
++import { getXanoToken } from '@/lib/auth/cookies'
++import { ENDPOINTS } from '@/lib/xano/config'
++import { xanoFetch } from '@/lib/xano/server'
++
++import { ensureEndpoint } from '../_utils'
++
++export async function GET() {
++  try {
++    ensureEndpoint(ENDPOINTS.mePath, 'mePath')
++    const token = await getXanoToken()
++    if (!token) return NextResponse.json({ user: null }, { status: 401 })
++
++    const res = await xanoFetch<any>(ENDPOINTS.mePath, { method: 'GET' }, token)
++    const user = res?.user ?? res?.data?.user ?? res?.data ?? res ?? null
++    return NextResponse.json({ user })
++  } catch (err) {
++    const message = err instanceof Error ? err.message : 'Failed to fetch user'
++    return NextResponse.json({ error: message }, { status: 401 })
++  }
++}
+diff --git a/app/api/auth/resend-verification/route.ts b/app/api/auth/resend-verification/route.ts
+new file mode 100644
+index 0000000..e899ba2
+--- /dev/null
++++ b/app/api/auth/resend-verification/route.ts
+@@ -0,0 +1,25 @@
++import { NextResponse } from 'next/server'
++
++import { ENDPOINTS } from '@/lib/xano/config'
++import { xanoFetch } from '@/lib/xano/server'
++
++import { ensureEndpoint } from '../_utils'
++
++export async function POST(req: Request) {
++  try {
++    ensureEndpoint(ENDPOINTS.resendVerificationPath, 'resendVerificationPath')
++    const body = (await req.json()) as { email?: string }
++    const email = body.email ?? ''
++
++    const res = await xanoFetch<any>(ENDPOINTS.resendVerificationPath, {
++      method: 'POST',
++      body: { email },
++    })
++
++    return NextResponse.json({ ok: true, data: res ?? null })
++  } catch (err) {
++    const message = err instanceof Error ? err.message : 'Resend failed'
++    return NextResponse.json({ error: message }, { status: 400 })
++  }
++}
++
+diff --git a/app/api/auth/verify-email/route.ts b/app/api/auth/verify-email/route.ts
+new file mode 100644
+index 0000000..4ea5628
+--- /dev/null
++++ b/app/api/auth/verify-email/route.ts
+@@ -0,0 +1,24 @@
++import { NextResponse } from 'next/server'
++
++import { ENDPOINTS } from '@/lib/xano/config'
++import { xanoFetch } from '@/lib/xano/server'
++
++import { ensureEndpoint } from '../_utils'
++
++export async function GET(req: Request) {
++  try {
++    ensureEndpoint(ENDPOINTS.verifyEmailPath, 'verifyEmailPath')
++    const url = new URL(req.url)
++    const token = url.searchParams.get('token')
++    if (!token) return NextResponse.json({ error: 'Missing token' }, { status: 400 })
++
++    const path = `${ENDPOINTS.verifyEmailPath}?token=${encodeURIComponent(token)}`
++    const res = await xanoFetch<any>(path, { method: 'GET' })
++
++    return NextResponse.json({ ok: true, data: res ?? null })
++  } catch (err) {
++    const message = err instanceof Error ? err.message : 'Verification failed'
++    return NextResponse.json({ error: message }, { status: 400 })
++  }
++}
++
+diff --git a/app/api/auth/google/start/route.ts b/app/api/auth/google/start/route.ts
+new file mode 100644
+index 0000000..a5b019d
+--- /dev/null
++++ b/app/api/auth/google/start/route.ts
+@@ -0,0 +1,16 @@
++import { NextResponse } from 'next/server'
++
++import { ENDPOINTS } from '@/lib/xano/config'
++
++import { ensureEndpoint } from '../../_utils'
++
++export async function GET() {
++  try {
++    ensureEndpoint(ENDPOINTS.googleStartUrl, 'googleStartUrl')
++    return NextResponse.redirect(ENDPOINTS.googleStartUrl)
++  } catch (err) {
++    const message = err instanceof Error ? err.message : 'Google OAuth not configured'
++    return NextResponse.json({ error: message }, { status: 500 })
++  }
++}
++
+diff --git a/app/api/auth/google/callback/route.ts b/app/api/auth/google/callback/route.ts
+new file mode 100644
+index 0000000..baa988c
+--- /dev/null
++++ b/app/api/auth/google/callback/route.ts
+@@ -0,0 +1,30 @@
++import { NextResponse } from 'next/server'
++
++import { setXanoToken } from '@/lib/auth/cookies'
++import { ENDPOINTS } from '@/lib/xano/config'
++import { xanoFetch } from '@/lib/xano/server'
++
++import { extractToken, ensureEndpoint } from '../../_utils'
++
++export async function GET(req: Request) {
++  try {
++    ensureEndpoint(ENDPOINTS.googleExchangeUrl, 'googleExchangeUrl')
++    const url = new URL(req.url)
++    const code = url.searchParams.get('code')
++    if (!code) return NextResponse.json({ error: 'Missing code' }, { status: 400 })
++
++    // Placeholder: depending on your Xano setup, you may need to POST { code } or call a URL with ?code=
++    const exchangeUrl = ENDPOINTS.googleExchangeUrl.includes('?')
++      ? `${ENDPOINTS.googleExchangeUrl}&code=${encodeURIComponent(code)}`
++      : `${ENDPOINTS.googleExchangeUrl}?code=${encodeURIComponent(code)}`
++
++    const res = await xanoFetch<any>(exchangeUrl, { method: 'GET' })
++    const token = extractToken(res)
++    if (token) await setXanoToken(token)
++
++    return NextResponse.redirect(new URL('/', url.origin))
++  } catch (err) {
++    const message = err instanceof Error ? err.message : 'Google OAuth failed'
++    return NextResponse.json({ error: message }, { status: 400 })
++  }
++}
+diff --git a/app/verify/page.tsx b/app/verify/page.tsx
+new file mode 100644
+index 0000000..531400f
+--- /dev/null
++++ b/app/verify/page.tsx
+@@ -0,0 +1,52 @@
++'use client'
++
++import * as React from 'react'
++import Link from 'next/link'
++import { useSearchParams } from 'next/navigation'
++
++export default function VerifyPage() {
++  const searchParams = useSearchParams()
++  const token = searchParams.get('token')
++
++  const [status, setStatus] = React.useState<'idle' | 'loading' | 'ok' | 'error'>('idle')
++  const [message, setMessage] = React.useState<string>('')
++
++  React.useEffect(() => {
++    if (!token) return
++    setStatus('loading')
++    fetch(`/api/auth/verify-email?token=${encodeURIComponent(token)}`)
++      .then(async (res) => {
++        const data = (await res.json()) as { error?: string }
++        if (!res.ok) throw new Error(data.error || 'Verification failed')
++        setStatus('ok')
++        setMessage('Email verified. You can now sign in.')
++      })
++      .catch((err) => {
++        setStatus('error')
++        setMessage(err instanceof Error ? err.message : 'Verification failed')
++      })
++  }, [token])
++
++  return (
++    <div className="mx-auto max-w-md p-6">
++      <h1 className="text-2xl font-semibold tracking-tight">Verify email</h1>
++      <p className="text-muted-foreground mt-2 text-sm">
++        {token ? 'Processing verification...' : 'Missing verification token.'}
++      </p>
++
++      <div className="mt-6 rounded-lg border bg-background p-4 text-sm">
++        {status === 'loading' ? 'Verifying...' : null}
++        {status === 'ok' ? message : null}
++        {status === 'error' ? message : null}
++        {status === 'idle' && token ? 'Ready.' : null}
++      </div>
++
++      <div className="mt-6 text-sm">
++        <Link href="/login" className="underline underline-offset-4 hover:text-primary">
++          Back to sign in
++        </Link>
++      </div>
++    </div>
++  )
++}
++
