@@ -2,24 +2,27 @@
 
 import * as React from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useSearchParams } from 'next/navigation'
 import { AtSignIcon, LockIcon } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { writePendingVerificationEmail } from '@/lib/auth/pending-verification'
+import { normalizeNextPath } from '@/lib/auth/redirect'
 
 function isValidEmail(email: string) {
   return email.includes('@')
 }
 
 export function LoginForm() {
-  const router = useRouter()
+  const searchParams = useSearchParams()
   const [email, setEmail] = React.useState('')
   const [password, setPassword] = React.useState('')
   const [submitting, setSubmitting] = React.useState(false)
-  const [serverError, setServerError] = React.useState<string | null>(null)
+  const [serverError, setServerError] = React.useState<string | null>(searchParams.get('error'))
 
   const [errors, setErrors] = React.useState<{ email?: string; password?: string }>({})
+  const nextPath = normalizeNextPath(searchParams.get('next'))
 
   const validate = () => {
     const next: typeof errors = {}
@@ -41,12 +44,36 @@ export function LoginForm() {
             const res = await fetch('/api/auth/login', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email, password }),
+              body: JSON.stringify({ email, password, next: nextPath }),
             })
             const data = (await res.json()) as { user?: unknown; requiresVerification?: boolean; error?: string }
-            if (!res.ok) throw new Error(data.error || 'Login failed')
+            if (!res.ok) {
+              if (data.requiresVerification) {
+                writePendingVerificationEmail(email)
+                const verifyUrl = new URL('/verify', window.location.origin)
+                verifyUrl.searchParams.set('email', email)
+                if (nextPath !== '/') {
+                  verifyUrl.searchParams.set('next', nextPath)
+                }
+                window.location.assign(verifyUrl.toString())
+                return
+              }
+
+              throw new Error(data.error || 'Login failed')
+            }
             console.log('login', { email })
-            router.push(data.requiresVerification ? '/verify' : '/')
+            if (data.requiresVerification) {
+              writePendingVerificationEmail(email)
+              const verifyUrl = new URL('/verify', window.location.origin)
+              verifyUrl.searchParams.set('email', email)
+              if (nextPath !== '/') {
+                verifyUrl.searchParams.set('next', nextPath)
+              }
+              window.location.assign(verifyUrl.toString())
+              return
+            }
+
+            window.location.assign(nextPath)
           } catch (err) {
             setServerError(err instanceof Error ? err.message : 'Login failed')
           } finally {
@@ -100,7 +127,10 @@ export function LoginForm() {
 
       <div className="flex items-center justify-between">
         <div />
-        <Link href="/forgot-password" className="text-muted-foreground text-sm hover:text-primary underline underline-offset-4">
+        <Link
+          href={email ? `/forgot-password?email=${encodeURIComponent(email)}` : '/forgot-password'}
+          className="text-muted-foreground text-sm hover:text-primary underline underline-offset-4"
+        >
           Forgot password?
         </Link>
       </div>
@@ -119,7 +149,7 @@ export function LoginForm() {
       <div className="text-muted-foreground text-sm">
         Don&apos;t have an account?{' '}
         <Link
-          href="/signup"
+          href={nextPath === '/' ? '/signup' : `/signup?next=${encodeURIComponent(nextPath)}`}
           className="hover:text-primary underline underline-offset-4"
         >
           Sign up

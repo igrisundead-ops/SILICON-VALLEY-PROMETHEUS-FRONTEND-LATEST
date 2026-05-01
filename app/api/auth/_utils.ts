@@ -26,3 +26,19 @@ export function getUserVerificationFlag(user: unknown): boolean | undefined {
   }
   return undefined
 }
+
+export function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) return error.message
+  return fallback
+}
+
+export function looksLikeEmailConfirmationError(message: string) {
+  const normalized = message.trim().toLowerCase()
+
+  return (
+    normalized.includes('email not confirmed') ||
+    normalized.includes('email not confirmed yet') ||
+    normalized.includes('email_not_confirmed') ||
+    normalized.includes('confirm your email')
+  )
+}

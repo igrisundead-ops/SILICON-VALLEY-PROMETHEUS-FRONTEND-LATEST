@@ -1,5 +1,5 @@
 'use client';
-import React, { useRef, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface IsoLevelWarpProps extends React.HTMLAttributes<HTMLDivElement> {
@@ -29,8 +29,37 @@ const IsoLevelWarp = ({
 }: IsoLevelWarpProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [motionEnabled, setMotionEnabled] = useState(false);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    type ConnectionNavigator = Navigator & {
+      connection?: {
+        saveData?: boolean;
+      };
+    };
+
+    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const updateMotionPreference = () => {
+      const connection = (navigator as ConnectionNavigator).connection;
+      const shouldAnimate = !motionQuery.matches && !connection?.saveData && window.innerWidth >= 1024;
+      setMotionEnabled(shouldAnimate);
+    };
+
+    updateMotionPreference();
+    motionQuery.addEventListener("change", updateMotionPreference);
+    window.addEventListener("resize", updateMotionPreference);
+
+    return () => {
+      motionQuery.removeEventListener("change", updateMotionPreference);
+      window.removeEventListener("resize", updateMotionPreference);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!motionEnabled) return;
+
     const canvas = canvasRef.current;
     const container = containerRef.current;
     if (!canvas || !container) return;
@@ -41,11 +70,12 @@ const IsoLevelWarp = ({
     let width = container.offsetWidth;
     let height = container.offsetHeight;
     let animationFrameId: number;
+    let isPaused = document.hidden;
 
     // Grid Configuration
     const gridGap = density;
-    const rows = Math.ceil(height / gridGap) + 5; // Extra buffer
-    const cols = Math.ceil(width / gridGap) + 5;
+    let rows = Math.ceil(height / gridGap) + 5; // Extra buffer
+    let cols = Math.ceil(width / gridGap) + 5;
     
     // Mouse Interaction
     const mouse = { x: -1000, y: -1000, targetX: -1000, targetY: -1000 };
@@ -56,8 +86,13 @@ const IsoLevelWarp = ({
     const resize = () => {
       width = container.offsetWidth;
       height = container.offsetHeight;
-      canvas.width = width;
-      canvas.height = height;
+      rows = Math.ceil(height / gridGap) + 5;
+      cols = Math.ceil(width / gridGap) + 5;
+
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.25);
+      canvas.width = Math.floor(width * pixelRatio);
+      canvas.height = Math.floor(height * pixelRatio);
+      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     };
 
     const handleMouseMove = (e: MouseEvent) => {
@@ -77,6 +112,8 @@ const IsoLevelWarp = ({
     };
 
     const draw = () => {
+      if (isPaused) return;
+
       // Clear Screen with trail effect (optional, simplified here for clarity)
       ctx.clearRect(0, 0, width, height);
       
@@ -145,20 +182,29 @@ const IsoLevelWarp = ({
       animationFrameId = requestAnimationFrame(draw);
     };
 
+    const handleVisibilityChange = () => {
+      isPaused = document.hidden;
+      if (!isPaused) {
+        animationFrameId = requestAnimationFrame(draw);
+      }
+    };
+
     window.addEventListener("resize", resize);
     container.addEventListener("mousemove", handleMouseMove);
     container.addEventListener("mouseleave", handleMouseLeave);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     
     resize();
-    draw();
+    animationFrameId = requestAnimationFrame(draw);
 
     return () => {
       window.removeEventListener("resize", resize);
       container.removeEventListener("mousemove", handleMouseMove);
       container.removeEventListener("mouseleave", handleMouseLeave);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       cancelAnimationFrame(animationFrameId);
     };
-  }, [color, speed, density]);
+  }, [color, speed, density, motionEnabled]);
 
   return (
     <div
@@ -166,7 +212,7 @@ const IsoLevelWarp = ({
       className={cn("absolute inset-0 z-0 overflow-hidden bg-black", className)}
       {...props}
     >
-      <canvas ref={canvasRef} className="block w-full h-full" />
+      {motionEnabled ? <canvas ref={canvasRef} className="block w-full h-full" /> : null}
       
       {/* Optional: Vignette overlay for depth */}
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_0%,rgba(0,0,0,0.92)_100%)] opacity-70 pointer-events-none" />

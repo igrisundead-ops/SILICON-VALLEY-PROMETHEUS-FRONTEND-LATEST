@@ -1,10 +1,11 @@
 'use client';
 
 import Link from 'next/link';
-import React from 'react';
+import React, { Suspense } from 'react';
 import { Button } from '@/components/ui/button';
-import { ChevronLeftIcon, Grid2x2PlusIcon, AppleIcon, GithubIcon } from 'lucide-react';
-import { FloatingPaths, GoogleIcon, AuthSeparator } from './auth-visuals';
+import { ChevronLeftIcon, Grid2x2PlusIcon } from 'lucide-react';
+import { FloatingPaths, AuthSeparator } from './auth-visuals';
+import { SocialAuthButtons } from './SocialAuthButtons';
 
 type AuthShellProps = {
   title: string;
@@ -65,24 +66,13 @@ export function AuthShell({ title, subtitle, children, showMobileBrandRow = true
             <p className="text-muted-foreground text-base">{subtitle}</p>
           </div>
 
-          <div className="space-y-2">
-            <Button type="button" size="lg" className="w-full">
-              <GoogleIcon className="size-4 me-2" />
-              Continue with Google
-            </Button>
-            <Button type="button" size="lg" className="w-full">
-              <AppleIcon className="size-4 me-2" />
-              Continue with Apple
-            </Button>
-            <Button type="button" size="lg" className="w-full">
-              <GithubIcon className="size-4 me-2" />
-              Continue with GitHub
-            </Button>
-          </div>
+          <Suspense fallback={null}>
+            <SocialAuthButtons />
+          </Suspense>
 
           <AuthSeparator />
 
-          {children}
+          <Suspense fallback={null}>{children}</Suspense>
 
           <p className="text-muted-foreground mt-8 text-sm">
             By clicking continue, you agree to our{' '}
