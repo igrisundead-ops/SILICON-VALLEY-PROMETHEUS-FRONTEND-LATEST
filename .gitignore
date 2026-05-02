@@ -32,3 +32,5 @@ next-env.d.ts
 .codex-*
 .npm-cache/
 test-results/
+.env.local
+.env.example
