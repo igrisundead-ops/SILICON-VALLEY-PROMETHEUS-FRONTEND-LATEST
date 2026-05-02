@@ -62,8 +62,7 @@ export const BILLING_PLAN_DEFINITIONS: Record<BillingPlanId, BillingPlanDefiniti
     monthlyLabel: '/ mo',
     creditsLabel: '30,000 Credits (everything in Studio +)',
     accent: 'from-[#2f92ff] via-[#56acff] to-[#8ec7ff]',
-    ctaLabel: 'Contact Us',
-    contactOnly: true,
+    ctaLabel: 'Get Started ($5,000/month)',
     features: [
       { label: 'High-end video ad campaign generation', hint: 'Built for premium campaigns and launch volume.' },
       { label: 'Apple-style cinematic commercial production', hint: 'Designed for polished flagship storytelling.' },

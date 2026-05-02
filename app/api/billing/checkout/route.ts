@@ -37,6 +37,15 @@ export async function POST(request: Request) {
       )
     }
 
+    if (!priceId.startsWith('price_')) {
+      return NextResponse.json(
+        {
+          error: `${getStripePriceEnvName(payload.planId)} must be a Stripe Price ID that starts with price_, not a Product ID.`,
+        },
+        { status: 400 },
+      )
+    }
+
     const supabase = await createClient()
     const {
       data: { user },
