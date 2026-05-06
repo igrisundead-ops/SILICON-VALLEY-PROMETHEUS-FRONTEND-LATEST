@@ -1,20 +1,18 @@
 import { NextResponse } from 'next/server'
 
-import { setXanoToken } from '@/lib/auth/cookies'
-import { ENDPOINTS } from '@/lib/xano/config'
-import { xanoFetch } from '@/lib/xano/server'
+import { createClient } from '@/lib/supabase/server'
 
-import { extractToken, ensureEndpoint, getUserVerificationFlag } from '../_utils'
+import { getErrorMessage, looksLikeEmailConfirmationError } from '../_utils'
 
 type LoginBody = {
   email: string
   password: string
+  next?: string
 }
 
 export async function POST(req: Request) {
   const startedAt = Date.now()
   try {
-    ensureEndpoint(ENDPOINTS.login, 'login')
     const body = (await req.json()) as Partial<LoginBody>
 
     const payload = {
@@ -28,27 +26,36 @@ export async function POST(req: Request) {
       ip: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? null,
     })
 
-    const res = await xanoFetch<any>(ENDPOINTS.login, { method: 'POST', body: payload })
-    const token = extractToken(res)
-    if (token) await setXanoToken(token)
+    const supabase = await createClient()
+    const { data, error } = await supabase.auth.signInWithPassword(payload)
 
-    const user = res?.user ?? res?.data?.user ?? res?.data ?? null
-    const verified = getUserVerificationFlag(user)
-    const requiresVerification =
-      verified === false ||
-      Boolean(res?.verification_required) ||
-      Boolean(res?.verificationRequired) ||
-      res?.status === 'verification_required'
+    if (error) {
+      if (looksLikeEmailConfirmationError(error.message)) {
+        return NextResponse.json(
+          {
+            error: error.message,
+            requiresVerification: true,
+          },
+          { status: 403 },
+        )
+      }
+
+      throw error
+    }
+
+    const user = data.user ?? null
+    const requiresVerification = Boolean(user && !user.email_confirmed_at)
 
     console.info('[api/auth/login] ok', {
       ms: Date.now() - startedAt,
       requiresVerification,
       hasUser: Boolean(user),
-      hasToken: Boolean(token),
+      hasSession: Boolean(data.session),
     })
+
     return NextResponse.json({ user, requiresVerification })
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Login failed'
+    const message = getErrorMessage(err, 'Login failed')
     console.error('[api/auth/login] error', { ms: Date.now() - startedAt, message })
     return NextResponse.json({ error: message }, { status: 401 })
   }

@@ -37,6 +37,7 @@ interface BladeNavGroupProps {
   activeHref: string | null
   hoveredHref: string | null
   onHoverChange: (href: string | null) => void
+  onRouteIntent: (href: string) => void
   collapsed: boolean
 }
 
@@ -74,7 +75,6 @@ const BLADE_TRANSITION = {
   damping: 34,
   mass: 0.84,
 }
-const SHOULD_EAGERLY_PREFETCH_WORKSPACE_ROUTES = process.env.NODE_ENV === 'production'
 
 export function DashboardSidebar() {
   const pathname = usePathname()
@@ -116,14 +116,6 @@ export function DashboardSidebar() {
   const activeHref = useMemo(() => {
     return menuItems.find((item) => isPathActive(pathname, item.href))?.href ?? null
   }, [menuItems, pathname])
-
-  useEffect(() => {
-    if (!SHOULD_EAGERLY_PREFETCH_WORKSPACE_ROUTES) return
-
-    for (const item of menuItems) {
-      void router.prefetch(item.href)
-    }
-  }, [menuItems, router])
 
   return (
     <motion.aside
@@ -197,7 +189,18 @@ export function DashboardSidebar() {
                 exit={{ opacity: 0, y: 6, scale: 0.985 }}
                 transition={COLLAPSE_CONTENT_TRANSITION}
               >
-                <div className="text-[11px] font-semibold uppercase tracking-[0.36em] text-white/38">Prometheus</div>
+                <div className="flex items-center">
+                  <Image 
+                    src="/branding/prometheus-logo-no-bg.png" 
+                    alt="Prometheus" 
+                    width={20} 
+                    height={20} 
+                    className="size-5 object-contain"
+                  />
+                  <p className="text-[11px] font-bold uppercase tracking-[0.36em] text-white/92 ml-1" style={{ fontFamily: 'var(--font-mono), ui-sans-serif, system-ui, sans-serif' }}>
+                    rometheus
+                  </p>
+                </div>
                 <div className="mt-3 text-lg font-semibold text-white/92">Creative operating system</div>
                 <p className="mt-1.5 max-w-[18rem] text-sm leading-6 text-white/42">
                   Hover a row to preview the carved blade state before you move.
@@ -214,6 +217,9 @@ export function DashboardSidebar() {
               activeHref={activeHref}
               hoveredHref={hoveredHref}
               onHoverChange={setHoveredHref}
+              onRouteIntent={(href) => {
+                void router.prefetch(href)
+              }}
               collapsed={collapsed}
             />
           </nav>
@@ -263,7 +269,7 @@ export function DashboardSidebar() {
   )
 }
 
-function BladeNavGroup({ items, activeHref, hoveredHref, onHoverChange, collapsed }: BladeNavGroupProps) {
+function BladeNavGroup({ items, activeHref, hoveredHref, onHoverChange, onRouteIntent, collapsed }: BladeNavGroupProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const itemRefs = useRef<Record<string, HTMLAnchorElement | null>>({})
   const [metrics, setMetrics] = useState<Record<string, BladeMetrics>>({})
@@ -342,8 +348,14 @@ function BladeNavGroup({ items, activeHref, hoveredHref, onHoverChange, collapse
               isCurrent={isCurrent}
               isSelected={isSelected}
               collapsed={collapsed}
-              onMouseEnter={() => onHoverChange(item.href)}
-              onFocus={() => onHoverChange(item.href)}
+              onMouseEnter={() => {
+                onHoverChange(item.href)
+                onRouteIntent(item.href)
+              }}
+              onFocus={() => {
+                onHoverChange(item.href)
+                onRouteIntent(item.href)
+              }}
               onBlur={() => onHoverChange(null)}
               onClick={() => {
                 if (item.key === 'editor') {
@@ -398,6 +410,7 @@ const NavItem = forwardRef<HTMLAnchorElement, NavItemProps>(function NavItem(
       <Link
         ref={ref}
         href={item.href}
+        prefetch={false}
         aria-current={isCurrent ? 'page' : undefined}
         title={collapsed ? item.label : undefined}
       className={cn(

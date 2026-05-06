@@ -1,10 +1,12 @@
 'use client'
 
 import * as React from 'react'
+import Link from 'next/link'
 import { Bell, Link2, Shield } from 'lucide-react'
 
 import { PrometheusShell } from '@/components/prometheus-shell'
 import { PageHeader } from '@/components/page-header'
+import { Button } from '@/components/ui/button'
 import {
   Card,
   CardContent,
@@ -19,6 +21,7 @@ export default function SettingsPage() {
   const [reducedMotion, setReducedMotion] = React.useState(false)
   const [notifications, setNotifications] = React.useState(true)
   const [safeMode, setSafeMode] = React.useState(true)
+  const [signingOut, setSigningOut] = React.useState(false)
 
   return (
     <PrometheusShell
@@ -81,6 +84,29 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Shield className="size-4 text-white/60" />
+              Billing & access
+            </CardTitle>
+            <CardDescription>Where users manage payment and unlock editing rights.</CardDescription>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-sm font-medium text-white/85">Editor access is subscription-gated</div>
+                <div className="mt-1 text-xs text-white/45">
+                  Unpaid users are redirected here before they can open or run edits.
+                </div>
+              </div>
+              <Button asChild>
+                <Link href="/settings/billing">Open billing</Link>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Shield className="size-4 text-white/60" />
               Safety
             </CardTitle>
             <CardDescription>Editing guardrails (UI only).</CardDescription>
@@ -92,6 +118,36 @@ export default function SettingsPage() {
                 <div className="mt-1 text-xs text-white/45">Conservative pacing and captioning.</div>
               </div>
               <Switch checked={safeMode} onCheckedChange={setSafeMode} />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Account</CardTitle>
+            <CardDescription>Session controls for the current workspace login.</CardDescription>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-sm font-medium text-white/85">Signed-in session</div>
+                <div className="mt-1 text-xs text-white/45">Sign out here if you want to switch accounts.</div>
+              </div>
+              <Button
+                variant="outline"
+                disabled={signingOut}
+                onClick={async () => {
+                  setSigningOut(true)
+
+                  try {
+                    await fetch('/api/auth/logout', { method: 'POST' })
+                  } finally {
+                    window.location.assign('/login')
+                  }
+                }}
+              >
+                {signingOut ? 'Signing out...' : 'Sign out'}
+              </Button>
             </div>
           </CardContent>
         </Card>

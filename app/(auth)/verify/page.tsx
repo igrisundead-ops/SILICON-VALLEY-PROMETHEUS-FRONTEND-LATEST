@@ -4,7 +4,7 @@ import { Suspense } from 'react'
 
 export default function VerifyPage() {
   return (
-    <AuthShell title="Verify email" subtitle="Verify your email to access your account.">
+    <AuthShell title="Check your email" subtitle="Confirm your address to unlock the workspace.">
       <Suspense fallback={null}>
         <VerifyForm />
       </Suspense>

@@ -1,16 +1,20 @@
 'use client'
 
 import * as React from 'react'
+import dynamic from 'next/dynamic'
 import { usePathname } from 'next/navigation'
 
 import { DashboardSidebar } from '@/components/dashboard-sidebar'
-import IsoLevelWarp from '@/components/ui/isometric-wave-grid-background'
+
+const IsoLevelWarp = dynamic(() => import('@/components/ui/isometric-wave-grid-background'), {
+  ssr: false,
+})
 
 const WORKSPACE_ROUTE_REGEX =
   /^\/(?:$|dashboard(?:\/|$)|projects(?:\/|$)|assets(?:\/|$)|editor(?:\/|$)|settings(?:\/|$)|exports(?:\/|$)|templates(?:\/|$)|team(?:\/|$)|highlights(?:\/|$)|captions(?:\/|$)|broll(?:\/|$)|brand-kit(?:\/|$)|billing(?:\/|$))/
 const EDITOR_DETAIL_ROUTE_REGEX = /^\/editor\/[^/]+(?:\/|$)/
 
-const AUTH_ROUTE_REGEX = /^\/(?:login|signup|verify|forgot-password|terms|privacy)(?:\/|$)/
+const AUTH_ROUTE_REGEX = /^\/(?:login|signup|verify|forgot-password|reset-password|terms|privacy)(?:\/|$)/
 
 function isWorkspaceRoute(pathname: string) {
   if (!pathname || pathname.startsWith('/api')) return false
@@ -29,6 +33,7 @@ export function WorkspaceFrame({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="relative h-screen w-full overflow-hidden font-sans">
+      <div className="absolute inset-0 z-0 bg-[radial-gradient(circle_at_14%_2%,rgba(212,176,255,0.14)_0%,rgba(34,14,58,0.08)_38%,rgba(0,0,0,0)_68%),linear-gradient(180deg,rgba(14,9,24,0.96)_0%,rgba(6,4,10,1)_100%)]" />
       <IsoLevelWarp color="168, 124, 255" density={32} speed={1.15} />
 
       <div className="pointer-events-none absolute inset-0 z-[1] bg-[radial-gradient(circle_at_14%_2%,rgba(212,176,255,0.22)_0%,rgba(34,14,58,0.12)_38%,rgba(0,0,0,0)_68%),linear-gradient(180deg,rgba(12,7,20,0.62)_0%,rgba(6,4,10,0.84)_100%)]" />

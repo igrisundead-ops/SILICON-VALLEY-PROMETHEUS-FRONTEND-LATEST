@@ -1,10 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import React from 'react';
+import React, { Suspense } from 'react';
+import Image from 'next/image';
 import { Button } from '@/components/ui/button';
-import { ChevronLeftIcon, Grid2x2PlusIcon, AppleIcon, GithubIcon } from 'lucide-react';
-import { FloatingPaths, GoogleIcon, AuthSeparator } from './auth-visuals';
+import { ChevronLeftIcon } from 'lucide-react';
+import { FloatingPaths, AuthSeparator } from './auth-visuals';
+import { SocialAuthButtons } from './SocialAuthButtons';
 
 type AuthShellProps = {
   title: string;
@@ -18,9 +20,17 @@ export function AuthShell({ title, subtitle, children, showMobileBrandRow = true
     <main className="relative md:h-screen md:overflow-hidden lg:grid lg:grid-cols-2">
       <div className="bg-muted/60 relative hidden h-full flex-col border-r p-10 lg:flex">
         <div className="from-background absolute inset-0 z-10 bg-gradient-to-t to-transparent" />
-        <div className="z-10 flex items-center gap-2">
-          <Grid2x2PlusIcon className="size-6" />
-          <p className="text-xl font-semibold">Asme</p>
+        <div className="z-10 flex items-center">
+          <Image 
+            src="/branding/prometheus-logo-no-bg.png" 
+            alt="Prometheus" 
+            width={28} 
+            height={28} 
+            className="size-7 object-contain"
+          />
+          <p className="text-xl font-bold tracking-tight ml-0.5" style={{ fontFamily: 'var(--font-mono), ui-sans-serif, system-ui, sans-serif' }}>
+            rometheus
+          </p>
         </div>
 
         <div className="z-10 mt-auto">
@@ -54,9 +64,17 @@ export function AuthShell({ title, subtitle, children, showMobileBrandRow = true
 
         <div className="mx-auto space-y-4 sm:w-sm">
           {showMobileBrandRow ? (
-            <div className="flex items-center gap-2 lg:hidden">
-              <Grid2x2PlusIcon className="size-6" />
-              <p className="text-xl font-semibold">Asme</p>
+            <div className="flex items-center lg:hidden">
+              <Image 
+                src="/branding/prometheus-logo-no-bg.png" 
+                alt="Prometheus" 
+                width={28} 
+                height={28} 
+                className="size-7 object-contain"
+              />
+              <p className="text-xl font-bold tracking-tight ml-0.5" style={{ fontFamily: 'var(--font-mono), ui-sans-serif, system-ui, sans-serif' }}>
+                rometheus
+              </p>
             </div>
           ) : null}
 
@@ -65,24 +83,13 @@ export function AuthShell({ title, subtitle, children, showMobileBrandRow = true
             <p className="text-muted-foreground text-base">{subtitle}</p>
           </div>
 
-          <div className="space-y-2">
-            <Button type="button" size="lg" className="w-full">
-              <GoogleIcon className="size-4 me-2" />
-              Continue with Google
-            </Button>
-            <Button type="button" size="lg" className="w-full">
-              <AppleIcon className="size-4 me-2" />
-              Continue with Apple
-            </Button>
-            <Button type="button" size="lg" className="w-full">
-              <GithubIcon className="size-4 me-2" />
-              Continue with GitHub
-            </Button>
-          </div>
+          <Suspense fallback={null}>
+            <SocialAuthButtons />
+          </Suspense>
 
           <AuthSeparator />
 
-          {children}
+          <Suspense fallback={null}>{children}</Suspense>
 
           <p className="text-muted-foreground mt-8 text-sm">
             By clicking continue, you agree to our{' '}

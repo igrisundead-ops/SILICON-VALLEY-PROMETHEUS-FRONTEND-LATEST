@@ -35,6 +35,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { BillingRequiredDialog } from "@/components/billing/billing-required-dialog";
 import { GlassUploadModalView } from "@/components/ui/glass-upload-modal-view";
 import { DynamicFrameLayout } from "@/components/ui/dynamic-frame-layout";
 import { TextEffect } from "@/components/ui/text-effect";
@@ -56,6 +57,7 @@ import {
 } from "@/lib/media/source-profile";
 import { clearPendingEditorNavigation, getPendingEditorNavigation, markPendingEditorNavigation, rememberCurrentPathForEditorReturn } from "@/lib/editor-navigation";
 import { createProcessingJob, createProject, getActiveStyleId, getMostRecentProject, startProcessing as persistStartProcessing, setActiveStyleId as persistActiveStyleId } from "@/lib/mock";
+import { buildBillingHref, hasBillingAccess } from "@/lib/billing";
 import { setSessionSourcePreview } from "@/lib/source-preview-session";
 import type { SourceProfile } from "@/lib/types";
 import { useSourceStage } from "@/hooks/use-source-stage";
@@ -90,6 +92,31 @@ function waitForNextPaint() {
     return new Promise<void>((resolve) => {
         window.requestAnimationFrame(() => resolve());
     });
+}
+
+function scheduleWhenBrowserIsIdle(task: () => void, timeout = 2000) {
+    if (typeof window === "undefined") {
+        return () => undefined;
+    }
+
+    type IdleWindow = Window & {
+        requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+        cancelIdleCallback?: (handle: number) => void;
+    };
+
+    const idleWindow = window as IdleWindow;
+
+    if (typeof idleWindow.requestIdleCallback === "function") {
+        const handle = idleWindow.requestIdleCallback(() => task(), { timeout });
+        return () => {
+            if (typeof idleWindow.cancelIdleCallback === "function") {
+                idleWindow.cancelIdleCallback(handle);
+            }
+        };
+    }
+
+    const timeoutId = window.setTimeout(task, timeout);
+    return () => window.clearTimeout(timeoutId);
 }
 
 let airtableStylePreviewsMemoryCache: Record<string, string[]> | null = null;
@@ -377,7 +404,6 @@ const DEMO_FRAMES: DynamicFrame[] = [
         id: 2,
         video: "https://static.cdn-luma.com/files/58ab7363888153e3/WebGL%20Exported%20(1).mp4",
         poster: "/style-previews/reels-heat-1.webp",
-        priority: true,
         defaultPos: { x: 4, y: 0, w: 4, h: 4 },
         mediaSize: 1,
         isHovered: false,
@@ -390,7 +416,6 @@ const DEMO_FRAMES: DynamicFrame[] = [
         id: 3,
         video: "https://static.cdn-luma.com/files/58ab7363888153e3/Jitter%20Exported%20Poster.mp4",
         poster: "/style-previews/red-statue-1.jpg",
-        priority: true,
         defaultPos: { x: 8, y: 0, w: 4, h: 4 },
         mediaSize: 1,
         isHovered: false,
@@ -1231,6 +1256,7 @@ export function VideoUploadInterface() {
         title: string;
         detail: string;
     } | null>(null);
+    const [billingGateOpen, setBillingGateOpen] = useState(false);
 
     const [sourceUrl, setSourceUrl] = useState("");
     const {
@@ -1384,13 +1410,17 @@ export function VideoUploadInterface() {
     }, []);
 
     useEffect(() => {
-        const warmProject = getMostRecentProject();
-        if (warmProject) {
-            void router.prefetch(`/editor/${warmProject.id}`);
-            return;
-        }
+        const cancelIdleWork = scheduleWhenBrowserIsIdle(() => {
+            const warmProject = getMostRecentProject();
+            if (warmProject) {
+                void router.prefetch(`/editor/${warmProject.id}`);
+                return;
+            }
 
-        void router.prefetch("/editor/__new__");
+            void router.prefetch("/editor/__new__");
+        }, 2600);
+
+        return cancelIdleWork;
     }, [router]);
 
     const addSourceChip = (label: string) => {
@@ -1401,6 +1431,10 @@ export function VideoUploadInterface() {
 
     const handleComposerSubmit = useCallback(async (payload: PromptComposerSubmitPayload) => {
         if (submitLockRef.current) return false;
+        if (!hasBillingAccess()) {
+            setBillingGateOpen(true);
+            return false;
+        }
 
         const { message, activeSlashCommand, creatorMentions } = payload;
         const uploadedSourceLabel = uploadedFileName?.trim().length > 0
@@ -1689,6 +1723,7 @@ export function VideoUploadInterface() {
 
     return (
         <div className="relative min-h-full w-full overflow-hidden bg-transparent px-4 py-10 text-white sm:px-6 sm:py-12">
+            <BillingRequiredDialog open={billingGateOpen} redirectHref={buildBillingHref('/')} contextLabel="Editing access" />
             <div className="pointer-events-none absolute inset-0 overflow-hidden">
                 <div className="absolute -top-40 left-[15%] h-80 w-80 rounded-full bg-violet-500/14 blur-[130px]" />
                 <div className="absolute top-[18%] right-[10%] h-72 w-72 rounded-full bg-fuchsia-500/10 blur-[120px]" />
@@ -2564,7 +2599,6 @@ export function VideoUploadInterface() {
                                                                     fill
                                                                     className="object-cover"
                                                                     sizes="96px"
-                                                                    unoptimized
                                                                     onError={() =>
                                                                         setFailedImages((m) => ({ ...m, [src]: true }))
                                                                     }
@@ -2591,7 +2625,6 @@ export function VideoUploadInterface() {
                                                             fill
                                                             className="object-cover"
                                                             sizes="100vw"
-                                                            unoptimized
                                                             onError={() =>
                                                                 setFailedImages((m) => ({
                                                                     ...m,

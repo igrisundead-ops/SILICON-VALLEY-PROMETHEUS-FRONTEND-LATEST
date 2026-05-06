@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server'
 
-import { clearXanoToken } from '@/lib/auth/cookies'
+import { createClient } from '@/lib/supabase/server'
 
 export async function POST() {
-  await clearXanoToken()
+  const supabase = await createClient()
+  await supabase.auth.signOut()
+
   return NextResponse.json({ ok: true })
 }

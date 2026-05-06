@@ -2,8 +2,9 @@
 
 import * as React from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { motion } from "motion/react";
-import { AtSignIcon, AppleIcon, ChevronLeftIcon, GithubIcon, Grid2x2PlusIcon } from 'lucide-react';
+import { AtSignIcon, AppleIcon, ChevronLeftIcon, GithubIcon } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -84,9 +85,17 @@ export function AuthPage() {
     <main className="relative md:h-screen md:overflow-hidden lg:grid lg:grid-cols-2">
       <div className="bg-muted/60 relative hidden h-full flex-col border-r p-10 lg:flex">
         <div className="from-background absolute inset-0 z-10 bg-gradient-to-t to-transparent" />
-        <div className="z-10 flex items-center gap-2">
-          <Grid2x2PlusIcon className="size-6" />
-          <p className="text-xl font-semibold">Asme</p>
+        <div className="z-10 flex items-center">
+          <Image 
+            src="/branding/prometheus-logo-no-bg.png" 
+            alt="Prometheus" 
+            width={28} 
+            height={28} 
+            className="size-7 object-contain"
+          />
+          <p className="text-xl font-bold tracking-tight ml-0.5" style={{ fontFamily: 'var(--font-mono), ui-sans-serif, system-ui, sans-serif' }}>
+            rometheus
+          </p>
         </div>
 
         <div className="z-10 mt-auto">
@@ -119,9 +128,17 @@ export function AuthPage() {
         </Button>
 
         <div className="mx-auto space-y-4 sm:w-sm">
-          <div className="flex items-center gap-2 lg:hidden">
-            <Grid2x2PlusIcon className="size-6" />
-            <p className="text-xl font-semibold">Asme</p>
+          <div className="flex items-center lg:hidden">
+            <Image 
+              src="/branding/prometheus-logo-no-bg.png" 
+              alt="Prometheus" 
+              width={28} 
+              height={28} 
+              className="size-7 object-contain"
+            />
+            <p className="text-xl font-bold tracking-tight ml-0.5" style={{ fontFamily: 'var(--font-mono), ui-sans-serif, system-ui, sans-serif' }}>
+              rometheus
+            </p>
           </div>
 
           <div className="flex flex-col space-y-1">

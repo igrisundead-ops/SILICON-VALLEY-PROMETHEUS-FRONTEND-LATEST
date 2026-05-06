@@ -1,8 +1,6 @@
 import type { Metadata } from 'next'
 import { Analytics } from '@vercel/analytics/next'
-import { Toaster } from 'sonner'
-import { CinematicClickRipple } from '@/components/ui/cinematic-click-ripple'
-import { ThemeProvider } from '@/components/theme-provider'
+import { RootClientEffects } from '@/components/root-client-effects'
 import { WorkspaceFrame } from '@/components/workspace-frame'
 import './globals.css'
 
@@ -37,23 +35,8 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
       <body className="font-sans antialiased">
-        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
-          <WorkspaceFrame>{children}</WorkspaceFrame>
-          <CinematicClickRipple />
-          <Toaster
-            richColors
-            closeButton
-            position="top-right"
-            theme="dark"
-            toastOptions={{
-              style: {
-                background: 'rgba(10, 10, 14, 0.96)',
-                border: '1px solid rgba(255, 255, 255, 0.08)',
-                color: '#fff',
-              },
-            }}
-          />
-        </ThemeProvider>
+        <WorkspaceFrame>{children}</WorkspaceFrame>
+        <RootClientEffects />
         <Analytics />
       </body>
     </html>
